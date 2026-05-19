@@ -9,7 +9,7 @@ from timeline_builder import build_investment_timeline
 
 
 st.set_page_config(
-    page_title="Real Estate AI Prototype",
+    page_title="Fanstastic Beast & Where to Find Them",
     layout="wide"
 )
 
@@ -137,7 +137,7 @@ def safe_md(text):
     return str(text).replace("$", r"\$")
 
 
-st.title("Real Estate AI Prototype")
+st.title("Fantastic Beast & Where to Find Them")
 st.caption(
     "Upload institutional real estate files → classify documents → reconstruct timeline → generate asset management intelligence"
 )
