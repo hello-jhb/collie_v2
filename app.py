@@ -157,6 +157,11 @@ for key in [
     if key not in st.session_state:
         st.session_state[key] = None
 
+# Track the set of files uploaded in this session so we know when the user
+# starts a new upload batch (and we should wipe leftover files from disk).
+if "session_upload_names" not in st.session_state:
+    st.session_state.session_upload_names = set()
+
 
 # ---------------------------------------------------
 # Directories
@@ -182,6 +187,35 @@ uploaded_files = st.file_uploader(
 )
 
 if uploaded_files:
+    current_names = {f.name for f in uploaded_files}
+
+    # If this is a different upload batch than what's tracked in this session,
+    # wipe the uploads folder so stale files from previous sessions don't
+    # leak into the analysis. Also reset any prior analysis state.
+    is_new_batch = current_names != st.session_state.session_upload_names
+
+    if is_new_batch:
+        removed = 0
+        for existing in UPLOAD_DIR.iterdir():
+            if existing.is_file():
+                try:
+                    existing.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+
+        # Reset prior results so the UI doesn't show stale analysis
+        st.session_state.classification_result = None
+        st.session_state.timeline_result = None
+        st.session_state.flexible_result = None
+        st.session_state.analysis = None
+        st.session_state.narrative = None
+
+        if removed:
+            st.caption(f"Cleared {removed} previous file(s) from the uploads folder.")
+
+        st.session_state.session_upload_names = current_names
+
     for uploaded_file in uploaded_files:
         file_path = UPLOAD_DIR / uploaded_file.name
 
