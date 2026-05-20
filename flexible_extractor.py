@@ -207,8 +207,10 @@ def scan_workbook_for_metric(file_path, metric):
 def classify_file_layer(file_name):
     """
     Classify a file by its investment lifecycle layer based on its name.
-    Returns one of: 'acquisition_underwriting', 'business_plan', 'actuals_2021',
+    Returns one of: 'underwriting', 'business_plan', 'actuals_2021',
     'actuals_2022', 'actuals_recent', or 'unknown'.
+
+    These names must match ssot.KNOWN_LAYERS exactly.
 
     Keyword groups reflect institutional RE naming conventions:
       - 'proforma' / 'pro forma' is the most common name for an UW model
@@ -245,7 +247,7 @@ def classify_file_layer(file_name):
         or name_lower.endswith(" uw") or name_lower.endswith("_uw")
     )
     if any(kw in name_lower for kw in uw_keywords) or uw_token_match:
-        return "acquisition_underwriting"
+        return "underwriting"
 
     # --- Business Plan (revised plan post-acquisition) ---
     bp_keywords = [

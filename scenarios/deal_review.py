@@ -17,6 +17,7 @@ from typing import Any
 
 import ssot
 from scenarios._llm import complete, llm_available
+from scenarios.profiles import filter_layer_metrics
 
 
 SYSTEM_PROMPT = """\
@@ -82,8 +83,13 @@ def generate_deal_review() -> dict[str, Any]:
     if not llm_available():
         return {"error": "OPENAI_API_KEY is not set."}
 
+    # Apply the Deal Review profile — keep only Investment Basis, Valuation &
+    # Returns, and the going-in subset of Debt & Leverage. Drops noise like
+    # DSCR / Current LTV that belong to Performance vs Plan.
+    underwriting_filtered = filter_layer_metrics(underwriting, "deal_review")
+
     user_prompt = USER_PROMPT_TEMPLATE.format(
-        underwriting_json=json.dumps(underwriting, indent=2, default=str),
+        underwriting_json=json.dumps(underwriting_filtered, indent=2, default=str),
     )
 
     narrative = complete(SYSTEM_PROMPT, user_prompt, temperature=0.2)
@@ -94,6 +100,7 @@ def generate_deal_review() -> dict[str, Any]:
         "data_used": {
             "layers": ["underwriting"],
             "source_files": [underwriting["source_file"]],
-            "metric_count": underwriting["metric_count"],
+            "metric_count_unfiltered": underwriting["metric_count"],
+            "metric_count_after_profile": underwriting_filtered["metric_count"],
         },
     }

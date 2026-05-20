@@ -18,6 +18,7 @@ from typing import Any
 
 import ssot
 from scenarios._llm import complete, llm_available
+from scenarios.profiles import filter_layer_metrics, _build_catalog_index
 
 
 SYSTEM_PROMPT = """\
@@ -112,9 +113,23 @@ def generate_perf_vs_plan() -> dict[str, Any]:
     plan_data = _layers_subset(s, plan_layers)
     actuals_data = _layers_subset(s, actuals_layers)
 
+    # Apply Performance vs Plan profile to every layer (build the catalog index
+    # once and reuse it across all filter calls). Drops out going-in deal
+    # structure and lease-specific metrics, keeping operating performance,
+    # occupancy/income durability, and current debt health.
+    catalog_index = _build_catalog_index()
+    plan_filtered = {
+        name: filter_layer_metrics(data, "perf_vs_plan", catalog_index)
+        for name, data in plan_data.items()
+    }
+    actuals_filtered = {
+        name: filter_layer_metrics(data, "perf_vs_plan", catalog_index)
+        for name, data in actuals_data.items()
+    }
+
     user_prompt = USER_PROMPT_TEMPLATE.format(
-        plan_layers_json=json.dumps(plan_data, indent=2, default=str),
-        actuals_layers_json=json.dumps(actuals_data, indent=2, default=str),
+        plan_layers_json=json.dumps(plan_filtered, indent=2, default=str),
+        actuals_layers_json=json.dumps(actuals_filtered, indent=2, default=str),
     )
 
     narrative = complete(SYSTEM_PROMPT, user_prompt, temperature=0.2)
@@ -129,5 +144,9 @@ def generate_perf_vs_plan() -> dict[str, Any]:
                 layer_data["source_file"]
                 for layer_data in {**plan_data, **actuals_data}.values()
             }),
+            "metric_counts_after_profile": {
+                **{f"plan/{k}": v["metric_count"] for k, v in plan_filtered.items()},
+                **{f"actuals/{k}": v["metric_count"] for k, v in actuals_filtered.items()},
+            },
         },
     }

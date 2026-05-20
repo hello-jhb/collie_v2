@@ -40,6 +40,7 @@ KNOWN_LAYERS = {
     "actuals_2023",
     "actuals_2024",
     "actuals_2025",
+    "actuals_recent",  # fallback when classifier sees a financial statement but no year
     "rent_roll",
     "debt",
 }
@@ -239,9 +240,11 @@ SCENARIO_REQUIREMENTS = {
             ["underwriting", "actuals_2021"],
             ["underwriting", "actuals_2022"],
             ["underwriting", "actuals_2023"],
+            ["underwriting", "actuals_recent"],
             ["business_plan", "actuals_2021"],
             ["business_plan", "actuals_2022"],
             ["business_plan", "actuals_2023"],
+            ["business_plan", "actuals_recent"],
         ],
         "description": "Needs at least one plan layer (UW or BP) AND at least one actuals layer.",
     },
