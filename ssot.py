@@ -1,0 +1,281 @@
+"""
+SSOT (Single Source of Truth) for an asset.
+
+v2 scope: ONE asset at a time, stored as JSON on disk.
+The SSOT is the durable record of "everything we know about this asset" —
+extraction writes into it, scenarios read from it. It survives across sessions
+and across scenarios, so files ingested for a Deal Review are still available
+when the user later runs a Performance Analysis on the same asset.
+
+Layered structure mirrors the investment lifecycle:
+    underwriting    — original acquisition assumptions (fixed/historical)
+    business_plan   — revised plan (post-acquisition)
+    actuals_YYYY    — realized performance for a given year
+    rent_roll       — current tenant/lease snapshot (reserved for v2.1)
+    debt            — loan terms and covenants (reserved for v2.1)
+
+Every metric carries provenance: which file, which sheet, which cell,
+when it was extracted. This is what makes the SSOT auditable.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+ASSETS_DIR = Path("assets")
+CURRENT_ASSET_FILE = ASSETS_DIR / "current_asset.json"
+
+# Layers we know about. The extractor/classifier may write any of these.
+# Unknown layers are allowed but flagged.
+KNOWN_LAYERS = {
+    "underwriting",
+    "business_plan",
+    "actuals_2020",
+    "actuals_2021",
+    "actuals_2022",
+    "actuals_2023",
+    "actuals_2024",
+    "actuals_2025",
+    "rent_roll",
+    "debt",
+}
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _empty_ssot(asset_id: str = "current") -> dict[str, Any]:
+    """Shape of a fresh SSOT. Identity stays empty until a file fills it in."""
+    return {
+        "asset_id": asset_id,
+        "identity": {
+            "name": None,
+            "property_type": None,
+            "location": None,
+            "sf_or_units": None,
+        },
+        "layers": {},          # layer_name -> {metrics, source_file, ingested_at}
+        "provenance": [],      # append-only log of every field write
+        "ingested_files": [],  # list of filenames ever ingested
+        "created_at": _now_iso(),
+        "updated_at": _now_iso(),
+    }
+
+
+# -----------------------------------------------------------------------------
+# Load / save
+# -----------------------------------------------------------------------------
+
+def load_ssot() -> dict[str, Any]:
+    """Read the current asset's SSOT from disk. Creates an empty one if missing."""
+    ASSETS_DIR.mkdir(exist_ok=True)
+    if not CURRENT_ASSET_FILE.exists():
+        ssot = _empty_ssot()
+        save_ssot(ssot)
+        return ssot
+
+    with open(CURRENT_ASSET_FILE, "r") as f:
+        return json.load(f)
+
+
+def save_ssot(ssot: dict[str, Any]) -> None:
+    """Persist the SSOT to disk. Stamps updated_at."""
+    ASSETS_DIR.mkdir(exist_ok=True)
+    ssot["updated_at"] = _now_iso()
+    with open(CURRENT_ASSET_FILE, "w") as f:
+        json.dump(ssot, f, indent=2, default=str)
+
+
+def reset_ssot() -> dict[str, Any]:
+    """Wipe and replace with a fresh SSOT. Used when starting work on a new asset."""
+    ssot = _empty_ssot()
+    save_ssot(ssot)
+    return ssot
+
+
+# -----------------------------------------------------------------------------
+# Layer writes
+# -----------------------------------------------------------------------------
+
+def write_layer(
+    layer: str,
+    metrics: list[dict[str, Any]],
+    source_file: str,
+    ssot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """
+    Write a layer's worth of metrics into the SSOT.
+
+    `metrics` is a list of dicts shaped like:
+        {
+            "metric_name": "Purchase Price",
+            "value": 25507408.7,
+            "sheet": "Assumption",
+            "value_cell": "D9",
+            "confidence": "high",
+        }
+
+    If the layer already exists, the new metrics REPLACE the old ones for that
+    layer. (Each file ingested at a given layer is treated as the source of
+    truth for that layer.) Provenance is appended, never overwritten.
+    """
+    if ssot is None:
+        ssot = load_ssot()
+
+    now = _now_iso()
+
+    ssot["layers"][layer] = {
+        "source_file": source_file,
+        "ingested_at": now,
+        "metric_count": len(metrics),
+        "metrics": {
+            m["metric_name"]: {
+                "value": m.get("value"),
+                "sheet": m.get("sheet"),
+                "cell": m.get("value_cell"),
+                "confidence": m.get("confidence"),
+            }
+            for m in metrics
+        },
+    }
+
+    # Provenance log — one entry per field write.
+    for m in metrics:
+        ssot["provenance"].append({
+            "layer": layer,
+            "field": m["metric_name"],
+            "value": m.get("value"),
+            "source_file": source_file,
+            "sheet": m.get("sheet"),
+            "cell": m.get("value_cell"),
+            "extracted_at": now,
+        })
+
+    if source_file not in ssot["ingested_files"]:
+        ssot["ingested_files"].append(source_file)
+
+    save_ssot(ssot)
+    return ssot
+
+
+def update_identity(
+    fields: dict[str, Any],
+    ssot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Set or update asset identity fields (name, type, location, size)."""
+    if ssot is None:
+        ssot = load_ssot()
+    for k, v in fields.items():
+        if k in ssot["identity"] and v is not None:
+            ssot["identity"][k] = v
+    save_ssot(ssot)
+    return ssot
+
+
+# -----------------------------------------------------------------------------
+# Reads
+# -----------------------------------------------------------------------------
+
+def read_layer(layer: str, ssot: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Return the metrics dict for one layer, or None if the layer isn't present."""
+    if ssot is None:
+        ssot = load_ssot()
+    return ssot["layers"].get(layer)
+
+
+def list_layers(ssot: dict[str, Any] | None = None) -> list[str]:
+    """Return the layers currently populated in SSOT."""
+    if ssot is None:
+        ssot = load_ssot()
+    return sorted(ssot["layers"].keys())
+
+
+def get_metric(
+    layer: str,
+    metric_name: str,
+    ssot: dict[str, Any] | None = None,
+) -> Any:
+    """Convenience: return just the value of one metric in one layer. None if missing."""
+    layer_data = read_layer(layer, ssot)
+    if not layer_data:
+        return None
+    return layer_data["metrics"].get(metric_name, {}).get("value")
+
+
+def ssot_summary(ssot: dict[str, Any] | None = None) -> dict[str, Any]:
+    """
+    Compact summary of what's in the SSOT — useful for showing the user
+    and for letting the agent decide what scenarios are runnable.
+    """
+    if ssot is None:
+        ssot = load_ssot()
+
+    return {
+        "asset_id": ssot["asset_id"],
+        "identity": ssot["identity"],
+        "layers_present": list_layers(ssot),
+        "ingested_files": ssot["ingested_files"],
+        "total_metric_writes": len(ssot["provenance"]),
+        "updated_at": ssot["updated_at"],
+    }
+
+
+# -----------------------------------------------------------------------------
+# Scenario readiness — does the SSOT have what a scenario needs?
+# -----------------------------------------------------------------------------
+
+SCENARIO_REQUIREMENTS = {
+    "deal_review": {
+        "required_any_of": [["underwriting"]],
+        "description": "Needs at least the acquisition underwriting layer.",
+    },
+    "perf_vs_plan": {
+        "required_any_of": [
+            ["underwriting", "actuals_2021"],
+            ["underwriting", "actuals_2022"],
+            ["underwriting", "actuals_2023"],
+            ["business_plan", "actuals_2021"],
+            ["business_plan", "actuals_2022"],
+            ["business_plan", "actuals_2023"],
+        ],
+        "description": "Needs at least one plan layer (UW or BP) AND at least one actuals layer.",
+    },
+}
+
+
+def scenario_ready(scenario: str, ssot: dict[str, Any] | None = None) -> dict[str, Any]:
+    """
+    Tells the caller whether the SSOT has enough data to run a given scenario,
+    and if not, what's missing.
+    """
+    if ssot is None:
+        ssot = load_ssot()
+
+    spec = SCENARIO_REQUIREMENTS.get(scenario)
+    if spec is None:
+        return {"ready": False, "reason": f"Unknown scenario: {scenario}"}
+
+    present = set(list_layers(ssot))
+
+    for combo in spec["required_any_of"]:
+        if all(layer in present for layer in combo):
+            return {
+                "ready": True,
+                "matched_requirement": combo,
+                "layers_present": sorted(present),
+            }
+
+    # Build a helpful "missing" message
+    needed_examples = spec["required_any_of"][0]
+    missing = [layer for layer in needed_examples if layer not in present]
+    return {
+        "ready": False,
+        "reason": spec["description"],
+        "layers_present": sorted(present),
+        "example_missing": missing,
+    }

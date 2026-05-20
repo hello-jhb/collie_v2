@@ -1,472 +1,388 @@
-import streamlit as st
+"""
+app.py — v2 frontend.
+
+Flow:
+  1. Landing screen: scenario picker (4 cards, 2 active + 2 "coming soon").
+  2. After picking a scenario, scoped chat workspace:
+     - "← Back to scenarios" header
+     - File uploader (auto-clears previous batch + resets SSOT)
+     - Chat thread with the scenario-bound agent
+     - SSOT panel in an expander
+
+The agent does all the heavy lifting (classify, ingest, run scenario, answer
+follow-ups). This file is just orchestration + presentation.
+"""
+
+from __future__ import annotations
+
 from pathlib import Path
 
-from document_extractor import extract_all_documents
-from analysis_engine import generate_performance_analysis
-from gpt_engine import ask_gpt, generate_asset_management_narrative
-from file_classifier_gpt import classify_uploaded_files
-from timeline_builder import build_investment_timeline
+import streamlit as st
 
+import ssot
+from agent_loop import AgentSession, SCENARIO_CONFIG
+
+
+# =============================================================================
+# Page config & global CSS
+# =============================================================================
 
 st.set_page_config(
-    page_title="Fanstastic Beast & Where to Find Them",
-    layout="wide"
+    page_title="Fantastic Beast & Where to Find Them",
+    page_icon="🏢",
+    layout="wide",
 )
 
-st.markdown("""
+st.markdown(
+    """
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 
-    /* Root font — sets the base for everything without touching spacing */
-    html, body {
-        font-family: "Inter", "Segoe UI", system-ui, sans-serif !important;
-    }
+  html, body, .stApp { font-family: "Inter", system-ui, sans-serif; }
+  .block-container { padding-top: 2rem; max-width: 1100px; }
 
-    /* App shell */
-    .stApp, .main, section.main {
-        font-family: "Inter", "Segoe UI", system-ui, sans-serif !important;
-    }
+  /* Hero */
+  .hero-title { font-size: 32px; font-weight: 700; margin-bottom: 4px; }
+  .hero-sub   { font-size: 15px; color: #6b7280; margin-bottom: 24px; }
 
-    /* Headers — no letter-spacing override to avoid word compression */
-    h1, h2, h3, h4, h5, h6 {
-        font-family: "Inter", "Segoe UI", system-ui, sans-serif !important;
-        font-weight: 600;
-        word-spacing: normal;
-        letter-spacing: normal;
-    }
+  /* Scenario cards */
+  .scenario-card {
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    padding: 20px;
+    background: #ffffff;
+    height: 100%;
+    transition: border-color 0.2s, box-shadow 0.2s;
+  }
+  .scenario-card.active:hover {
+    border-color: #2563eb;
+    box-shadow: 0 4px 14px rgba(37, 99, 235, 0.08);
+  }
+  .scenario-card.disabled { opacity: 0.55; background: #fafafa; }
+  .scenario-card .label {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 2px 8px;
+    border-radius: 4px;
+    margin-bottom: 12px;
+  }
+  .scenario-card .label.live    { background: #dcfce7; color: #166534; }
+  .scenario-card .label.soon    { background: #f3f4f6; color: #6b7280; }
+  .scenario-card .title  { font-size: 18px; font-weight: 600; margin-bottom: 6px; }
+  .scenario-card .desc   { font-size: 13px; color: #4b5563; line-height: 1.5; min-height: 56px; }
 
-    /* Markdown prose — explicit word/letter spacing reset to prevent compression */
-    .stMarkdown p,
-    .stMarkdown li,
-    .stMarkdown h1,
-    .stMarkdown h2,
-    .stMarkdown h3 {
-        font-family: "Inter", "Segoe UI", system-ui, sans-serif !important;
-        font-size: 14px;
-        word-spacing: normal;
-        letter-spacing: normal;
-        line-height: 1.6;
-    }
+  /* Scoped workspace header */
+  .ws-header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 18px; }
+  .ws-title  { font-size: 22px; font-weight: 600; }
+  .ws-scen   { font-size: 12px; color: #6b7280; text-transform: uppercase; letter-spacing: 0.06em; }
 
-    /* Inline bold/italic inside markdown must not collapse surrounding spaces */
-    .stMarkdown strong,
-    .stMarkdown em,
-    .stMarkdown b,
-    .stMarkdown i {
-        font-family: "Inter", "Segoe UI", system-ui, sans-serif !important;
-        word-spacing: normal;
-        letter-spacing: normal;
-    }
+  /* SSOT pills */
+  .ssot-pill {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 12px;
+    background: #eef2ff;
+    color: #3730a3;
+    font-size: 11px;
+    font-weight: 500;
+    margin: 2px 4px 2px 0;
+  }
 
-    /* Captions and labels */
-    .stCaption, label {
-        font-family: "Inter", "Segoe UI", system-ui, sans-serif !important;
-        font-size: 13px;
-        word-spacing: normal;
-        letter-spacing: normal;
-    }
-
-    /* Metric labels */
-    [data-testid="stMetricLabel"] > div {
-        font-family: "Inter", "Segoe UI", system-ui, sans-serif !important;
-        font-size: 11px;
-        font-weight: 500;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-        color: #6b7280;
-    }
-
-    /* Metric values */
-    [data-testid="stMetricValue"] > div {
-        font-family: "Inter", "Segoe UI", system-ui, sans-serif !important;
-        font-size: 20px;
-        font-weight: 600;
-        word-spacing: normal;
-        letter-spacing: normal;
-    }
-
-    /* Buttons */
-    .stButton > button {
-        font-family: "Inter", "Segoe UI", system-ui, sans-serif !important;
-        font-weight: 500;
-        letter-spacing: normal;
-    }
-
-    /* Dataframe */
-    .stDataFrame {
-        font-family: "Inter", "Segoe UI", system-ui, sans-serif !important;
-        font-size: 13px;
-    }
-
-    /* JSON viewer — monospace only here */
-    .stJson {
-        font-family: "JetBrains Mono", "Fira Code", "Consolas", monospace !important;
-        font-size: 12px;
-    }
-
-    /* Expander header */
-    [data-testid="stExpander"] summary {
-        font-family: "Inter", "Segoe UI", system-ui, sans-serif !important;
-        font-weight: 500;
-        letter-spacing: normal;
-    }
-
-    /* Sidebar */
-    [data-testid="stSidebar"] * {
-        font-family: "Inter", "Segoe UI", system-ui, sans-serif !important;
-    }
+  /* Tool-trace items */
+  .tool-trace {
+    font-family: "JetBrains Mono", "Fira Code", monospace;
+    font-size: 11px;
+    color: #4b5563;
+    margin: 2px 0;
+  }
 </style>
-""", unsafe_allow_html=True)
-
-
-def format_label(value):
-    """Convert snake_case or underscore strings to Title Case for display."""
-    if not value:
-        return "Unknown"
-    return str(value).replace("_", " ").title()
-
-
-def safe_md(text):
-    """
-    Escape characters that Streamlit's markdown renderer would mis-interpret.
-    Specifically, escape `$` so paired dollar signs in prose (e.g. '$25M ... $30M')
-    don't get treated as LaTeX math delimiters and collapse the text between them.
-    """
-    if not text:
-        return ""
-    return str(text).replace("$", r"\$")
-
-
-st.title("Fantastic Beast & Where to Find Them")
-st.caption(
-    "Upload institutional real estate files → classify documents → reconstruct timeline → generate asset management intelligence"
+""",
+    unsafe_allow_html=True,
 )
 
 
-# ---------------------------------------------------
+# =============================================================================
 # Session state
-# ---------------------------------------------------
-
-for key in [
-    "classification_result",
-    "timeline_result",
-    "flexible_result",
-    "analysis",
-    "narrative"
-]:
-    if key not in st.session_state:
-        st.session_state[key] = None
-
-# Track the set of files uploaded in this session so we know when the user
-# starts a new upload batch (and we should wipe leftover files from disk).
-if "session_upload_names" not in st.session_state:
-    st.session_state.session_upload_names = set()
-
-
-# ---------------------------------------------------
-# Directories
-# ---------------------------------------------------
+# =============================================================================
 
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
-REPOSITORY_DIR = Path("repository")
-REPOSITORY_DIR.mkdir(exist_ok=True)
+for key, default in [
+    ("active_scenario", None),
+    ("agent_session", None),
+    ("uploaded_filenames", set()),
+    ("last_auto_message", None),
+]:
+    if key not in st.session_state:
+        st.session_state[key] = default
 
 
-# ---------------------------------------------------
-# Upload files
-# ---------------------------------------------------
+# =============================================================================
+# Helpers
+# =============================================================================
 
-st.header("1. Upload Investment Files")
-
-uploaded_files = st.file_uploader(
-    "Upload underwriting, business plans, financial statements, rent rolls, debt files, or reports",
-    type=["xlsx", "xlsm", "csv", "pdf"],
-    accept_multiple_files=True
-)
-
-if uploaded_files:
-    current_names = {f.name for f in uploaded_files}
-
-    # If this is a different upload batch than what's tracked in this session,
-    # wipe the uploads folder so stale files from previous sessions don't
-    # leak into the analysis. Also reset any prior analysis state.
-    is_new_batch = current_names != st.session_state.session_upload_names
-
-    if is_new_batch:
-        removed = 0
-        for existing in UPLOAD_DIR.iterdir():
-            if existing.is_file():
-                try:
-                    existing.unlink()
-                    removed += 1
-                except OSError:
-                    pass
-
-        # Reset prior results so the UI doesn't show stale analysis
-        st.session_state.classification_result = None
-        st.session_state.timeline_result = None
-        st.session_state.flexible_result = None
-        st.session_state.analysis = None
-        st.session_state.narrative = None
-
-        if removed:
-            st.caption(f"Cleared {removed} previous file(s) from the uploads folder.")
-
-        st.session_state.session_upload_names = current_names
-
-    for uploaded_file in uploaded_files:
-        file_path = UPLOAD_DIR / uploaded_file.name
-
-        with open(file_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
-
-    st.success(f"{len(uploaded_files)} file(s) uploaded.")
+def _wipe_uploads_and_reset_ssot() -> None:
+    """Clean slate for a new analysis."""
+    for p in UPLOAD_DIR.iterdir():
+        if p.is_file():
+            try:
+                p.unlink()
+            except OSError:
+                pass
+    ssot.reset_ssot()
+    st.session_state.uploaded_filenames = set()
 
 
-# ---------------------------------------------------
-# Run analysis
-# ---------------------------------------------------
-
-st.header("2. Reconstruct Investment State")
-
-if st.button("Run Analysis"):
-
-    with st.spinner("Understanding uploaded files..."):
-        classification_result = classify_uploaded_files("uploads")
-
-    with st.spinner("Building investment timeline..."):
-        timeline_result = build_investment_timeline(classification_result)
-
-    with st.spinner("Extracting investment evidence..."):
-        flexible_result = extract_all_documents("uploads", classification_result=classification_result)
-
-    with st.spinner("Building investment context..."):
-        analysis = generate_performance_analysis(flexible_result)
-
-        # Add timeline/classification context to analysis package for GPT
-        analysis["file_classification"] = classification_result
-        analysis["investment_timeline"] = timeline_result
-
-    with st.spinner("Generating asset management assessment..."):
-        narrative = generate_asset_management_narrative(analysis)
-
-    st.session_state.classification_result = classification_result
-    st.session_state.timeline_result = timeline_result
-    st.session_state.flexible_result = flexible_result
-    st.session_state.analysis = analysis
-    st.session_state.narrative = narrative
-
-    st.success("Investment state reconstructed.")
+def _activate_scenario(scenario_key: str) -> None:
+    """User clicked a scenario card — start a fresh session for it."""
+    _wipe_uploads_and_reset_ssot()
+    st.session_state.active_scenario = scenario_key
+    st.session_state.agent_session = AgentSession(scenario_key)
+    st.session_state.last_auto_message = None
 
 
-# ---------------------------------------------------
-# File understanding
-# ---------------------------------------------------
+def _back_to_landing() -> None:
+    st.session_state.active_scenario = None
+    st.session_state.agent_session = None
 
-if st.session_state.classification_result:
 
-    st.header("3. File Understanding")
+def _ssot_panel() -> None:
+    """Show what's currently in SSOT."""
+    summary = ssot.ssot_summary()
+    layers = summary["layers_present"]
+    files = summary["ingested_files"]
 
-    classifications = st.session_state.classification_result.get(
-        "classifications",
-        []
+    if not layers and not files:
+        st.caption("No files ingested yet.")
+        return
+
+    st.markdown("**Layers in SSOT:**")
+    if layers:
+        st.markdown(
+            " ".join(f'<span class="ssot-pill">{layer}</span>' for layer in layers),
+            unsafe_allow_html=True,
+        )
+    else:
+        st.caption("(none)")
+
+    st.markdown("**Files ingested:**")
+    if files:
+        for f in files:
+            st.markdown(f"- {f}")
+    else:
+        st.caption("(none)")
+
+
+# =============================================================================
+# Landing view — scenario picker
+# =============================================================================
+
+def render_landing() -> None:
+    st.markdown(
+        '<div class="hero-title">Fantastic Beast & Where to Find Them</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div class="hero-sub">Pick an analysis to start. Each scenario is a '
+        'scoped workspace — upload the relevant files and chat with the agent.</div>',
+        unsafe_allow_html=True,
     )
 
-    for item in classifications:
+    # Card grid: 2 columns x 2 rows
+    cards = [
+        {
+            "key": "deal_review",
+            "label": "live",
+            "title": "Deal Analysis",
+            "desc": "Summarize an acquisition from a single underwriting model. "
+                    "Going-in basis, NOI, IRR, exit value, debt terms.",
+            "active": True,
+        },
+        {
+            "key": "perf_vs_plan",
+            "label": "live",
+            "title": "Performance Analysis",
+            "desc": "Compare actuals against the underwriting or business plan. "
+                    "Year-by-year variance with driver attribution.",
+            "active": True,
+        },
+        {
+            "key": "lease_review",
+            "label": "soon",
+            "title": "Lease Review",
+            "desc": "Reconcile tenant-level data between leases and rent rolls. "
+                    "Flag discrepancies in term, base rent, escalations.",
+            "active": False,
+        },
+        {
+            "key": "debt_analysis",
+            "label": "soon",
+            "title": "Debt Analysis",
+            "desc": "DSCR, debt yield, LTV against loan covenants. "
+                    "Refinance and maturity outlook.",
+            "active": False,
+        },
+    ]
 
-        with st.container(border=True):
+    row1 = st.columns(2, gap="medium")
+    row2 = st.columns(2, gap="medium")
+
+    for card, col in zip(cards, [*row1, *row2]):
+        with col:
+            cls = "scenario-card active" if card["active"] else "scenario-card disabled"
+            label_cls = "live" if card["active"] else "soon"
+            label_text = "Available" if card["active"] else "Coming soon"
 
             st.markdown(
-                f"### {item.get('file_name', 'Unknown file')}"
+                f"""
+<div class="{cls}">
+  <span class="label {label_cls}">{label_text}</span>
+  <div class="title">{card['title']}</div>
+  <div class="desc">{card['desc']}</div>
+</div>
+""",
+                unsafe_allow_html=True,
             )
 
-            col1, col2, col3, col4 = st.columns(4)
-
-            col1.metric(
-                "Document Type",
-                format_label(item.get("document_type"))
-            )
-
-            col2.metric(
-                "Investment Role",
-                format_label(item.get("investment_lifecycle_role"))
-            )
-
-            col3.metric(
-                "Likely Period",
-                str(item.get("likely_year", "Unknown"))
-            )
-
-            col4.metric(
-                "Confidence",
-                format_label(item.get("confidence"))
-            )
-
-            if item.get("relevant_tabs"):
-                st.write(
-                    "**Relevant Tabs:** "
-                    + ", ".join(item.get("relevant_tabs", []))
+            if card["active"]:
+                st.button(
+                    f"Start →",
+                    key=f"start_{card['key']}",
+                    on_click=_activate_scenario,
+                    args=(card["key"],),
+                    use_container_width=True,
+                )
+            else:
+                st.button(
+                    "Not available yet",
+                    key=f"disabled_{card['key']}",
+                    disabled=True,
+                    use_container_width=True,
                 )
 
-            if item.get("key_detected_sections"):
-                st.write(
-                    "**Detected Sections:** "
-                    + ", ".join(item.get("key_detected_sections", []))
-                )
 
-            if item.get("reasoning"):
-                st.caption(item.get("reasoning"))
+# =============================================================================
+# Scenario view — file uploader + chat
+# =============================================================================
 
+def render_scenario() -> None:
+    scenario_key = st.session_state.active_scenario
+    cfg = SCENARIO_CONFIG[scenario_key]
+    agent: AgentSession = st.session_state.agent_session
 
-# ---------------------------------------------------
-# Investment timeline
-# ---------------------------------------------------
+    # Header
+    left, right = st.columns([4, 1])
+    with left:
+        st.markdown(
+            f'<div class="ws-header"><div>'
+            f'<div class="ws-scen">{cfg["display_name"]}</div>'
+            f'<div class="ws-title">Workspace</div>'
+            f'</div></div>',
+            unsafe_allow_html=True,
+        )
+    with right:
+        st.button("← Back to scenarios", on_click=_back_to_landing, use_container_width=True)
 
-if st.session_state.timeline_result:
+    st.divider()
 
-    st.header("4. Investment Timeline")
-
-    timeline = st.session_state.timeline_result
-    events = timeline.get("timeline_events", [])
-
-    if events:
-        for event in events:
-            with st.container(border=True):
-                col1, col2, col3 = st.columns([1, 2, 3])
-
-                col1.metric(
-                    "Period",
-                    str(event.get("year", "Unknown"))
-                )
-
-                col2.write(
-                    f"**{event.get('timeline_type', 'Unknown')}**"
-                )
-
-                col3.write(
-                    event.get("description", "")
-                )
-
-                st.caption(
-                    f"Source: {event.get('file_name', 'Unknown file')} | "
-                    f"Confidence: {event.get('confidence', 'Unknown')}"
-                )
-    else:
-        st.info("No timeline events were reconstructed.")
-
-
-# ---------------------------------------------------
-# Asset management assessment
-# ---------------------------------------------------
-
-if st.session_state.narrative:
-
-    st.header("5. Asset Management Assessment")
-
-    # Compact strip showing which files the assessment is grounded in
-    if st.session_state.classification_result:
-        classifications = st.session_state.classification_result.get("classifications", [])
-        if classifications:
-            file_chips = " · ".join(
-                f"**{item.get('file_name', '?')}** ({format_label(item.get('document_type'))})"
-                for item in classifications
-            )
-            st.caption("Sources reviewed: " + file_chips)
-
-    with st.container(border=True):
-        st.markdown(safe_md(st.session_state.narrative))
-
-
-# ---------------------------------------------------
-# Ask questions
-# ---------------------------------------------------
-
-if st.session_state.analysis and st.session_state.flexible_result:
-
-    st.header("6. Ask the Asset")
-
-    question = st.chat_input(
-        "Ask a question about the uploaded investment files..."
+    # File uploader
+    uploaded = st.file_uploader(
+        "Upload files for this analysis",
+        type=["xlsx", "xlsm"],
+        accept_multiple_files=True,
+        key=f"upload_{scenario_key}",
     )
 
-    if question:
+    # New-batch detection: if the uploader's filenames differ from what we've
+    # tracked in this session, save the new ones and queue an auto-message
+    # to the agent telling it to ingest them.
+    auto_trigger_message: str | None = None
 
-        st.markdown(f"**Question:** {question}")
+    if uploaded:
+        current_names = {f.name for f in uploaded}
+        if current_names != st.session_state.uploaded_filenames:
+            # Save new files to disk
+            new_files = [f for f in uploaded if f.name not in st.session_state.uploaded_filenames]
+            for uf in new_files:
+                (UPLOAD_DIR / uf.name).write_bytes(uf.getbuffer())
 
-        with st.spinner("Analyzing investment context..."):
-
-            answer = ask_gpt(
-                question,
-                st.session_state.flexible_result,
-                st.session_state.analysis
+            st.session_state.uploaded_filenames = current_names
+            file_list = ", ".join(sorted(current_names))
+            auto_trigger_message = (
+                f"I have uploaded these files: {file_list}. "
+                f"Please ingest them and run the {cfg['display_name']} analysis."
             )
 
-        st.markdown("### Answer")
-        with st.container(border=True):
-            st.markdown(safe_md(answer))
+    # SSOT panel
+    with st.expander("📂 SSOT — Asset record", expanded=False):
+        _ssot_panel()
+
+    st.divider()
+
+    # Chat history
+    for m in agent.display_messages():
+        with st.chat_message(m["role"]):
+            st.markdown(m["content"])
+
+    # Auto-trigger after file upload (only fires once per new batch)
+    if auto_trigger_message and auto_trigger_message != st.session_state.last_auto_message:
+        st.session_state.last_auto_message = auto_trigger_message
+        with st.chat_message("user"):
+            st.markdown(auto_trigger_message)
+        with st.chat_message("assistant"):
+            with st.spinner("Reading files and running analysis..."):
+                reply = agent.send(auto_trigger_message)
+            st.markdown(reply)
+        _render_tool_trace(agent)
+
+    # User chat input
+    user_input = st.chat_input("Ask a question about this analysis...")
+    if user_input:
+        with st.chat_message("user"):
+            st.markdown(user_input)
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                reply = agent.send(user_input)
+            st.markdown(reply)
+        _render_tool_trace(agent)
 
 
-# ---------------------------------------------------
-# Debug / advanced diagnostics
-# ---------------------------------------------------
-
-if (
-    st.session_state.flexible_result
-    or st.session_state.analysis
-    or st.session_state.classification_result
-    or st.session_state.timeline_result
-):
-
-    with st.expander("Debug / Advanced Diagnostics"):
-
-        if st.session_state.flexible_result:
-
-            st.subheader("Metric Extraction Coverage")
-
-            flexible_result = st.session_state.flexible_result
-
-            total_metrics = flexible_result.get("total_metrics", 0)
-            extracted_metrics = flexible_result.get("extracted_count", 0)
-            missing_metrics = flexible_result.get("missing_count", 0)
-
-            col1, col2, col3 = st.columns(3)
-
-            col1.metric("Catalog Metrics", total_metrics)
-            col2.metric("Metrics Found", extracted_metrics)
-            col3.metric("Metrics Missing", missing_metrics)
-
-            progress_value = (
-                extracted_metrics / total_metrics
-                if total_metrics > 0
-                else 0
+def _render_tool_trace(agent: AgentSession) -> None:
+    """Show what tools the agent called in its last turn (for transparency)."""
+    if not agent.last_tool_calls:
+        return
+    with st.expander(f"🔧 Tool calls this turn ({len(agent.last_tool_calls)})", expanded=False):
+        for tc in agent.last_tool_calls:
+            args_preview = ", ".join(f"{k}={v!r}" for k, v in tc["arguments"].items())
+            st.markdown(
+                f'<div class="tool-trace">→ <b>{tc["name"]}</b>({args_preview})</div>',
+                unsafe_allow_html=True,
             )
+            result = tc["result"]
+            if isinstance(result, dict) and "error" in result:
+                st.markdown(f'<div class="tool-trace">  ❌ {result["error"]}</div>', unsafe_allow_html=True)
+            elif isinstance(result, dict):
+                # Compact summary based on result keys
+                preview_keys = [k for k in ("filename", "layer", "metric_count", "layers_now_present",
+                                            "files", "ready", "narrative") if k in result]
+                if "narrative" in preview_keys:
+                    st.markdown('<div class="tool-trace">  ✓ narrative generated</div>', unsafe_allow_html=True)
+                else:
+                    preview = {k: result[k] for k in preview_keys}
+                    st.markdown(f'<div class="tool-trace">  ✓ {preview}</div>', unsafe_allow_html=True)
+            else:
+                st.markdown(f'<div class="tool-trace">  ✓ {result}</div>', unsafe_allow_html=True)
 
-            st.progress(progress_value)
 
-            with st.expander("View Extracted Metrics"):
-                st.dataframe(
-                    flexible_result.get("extracted_metrics", [])
-                )
+# =============================================================================
+# Router
+# =============================================================================
 
-            with st.expander("View Missing Metrics"):
-                st.dataframe(
-                    flexible_result.get("missing_metrics", [])
-                )
-
-        if st.session_state.classification_result:
-            st.subheader("File Classification JSON")
-            st.json(st.session_state.classification_result)
-
-        if st.session_state.timeline_result:
-            st.subheader("Investment Timeline JSON")
-            st.json(st.session_state.timeline_result)
-
-        if st.session_state.analysis:
-            st.subheader("Structured Analysis Context")
-            st.json(st.session_state.analysis)
-
-        if st.session_state.flexible_result:
-            st.subheader("Flexible Extraction Output")
-            st.json(st.session_state.flexible_result)
+if st.session_state.active_scenario is None:
+    render_landing()
+else:
+    render_scenario()
