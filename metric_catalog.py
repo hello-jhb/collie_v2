@@ -249,21 +249,17 @@ def catalog_to_dataframe(catalog):
 
     for item in catalog:
         rows.append({
-            "metric_id": item["metric_id"],
-            "metric_name": item["metric_name"],
-            "category": item["category"],
-            "definition": item["definition"],
-            "formula": item["formula"],
-            "data_format": item["data_format"],
-            "source": item["source"],
-            "system": item["system"],
-            "stakeholder": item["stakeholder"],
-            "layers": "; ".join(item["layers"]),
-            "aliases": "; ".join(item["aliases"]),
+            "metric_id":     item["metric_id"],
+            "metric_name":   item["metric_name"],
+            "category":      item["category"],
+            "definition":    item["definition"],
+            "formula":       item["formula"],
+            "source":        item["source"],
+            "data_nature":   item["data_nature"],
+            "metric_source": item["metric_source"],
+            "aliases":       "; ".join(item["aliases"]),
             "core_question": item["core_question"],
-            "priority": item["priority"],
-            "dashboard_flag": item["dashboard_flag"],
-            "extraction_notes": item["extraction_notes"],
+            "priority":      item["priority"],
         })
 
     return pd.DataFrame(rows)
