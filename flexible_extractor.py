@@ -277,14 +277,18 @@ def scan_workbook_for_metric(file_path, metric):
 def extract_raw_labeled_pairs(file_path, max_pairs: int = 600) -> list[dict]:
     """
     Extract ALL (sheet, label, value) pairs from a workbook without any
-    catalog filtering. This gives the raw structure of the model to GPT
-    so it can reason about things the metric catalog hasn't seen.
+    catalog filtering. This is the input for Pass 2 (GPT insight pass).
 
     Returns a list of dicts:
-        {"sheet": str, "label": str, "value": numeric, "cell": str}
+        {"sheet": str, "label": str, "value": numeric, "cell": str,
+         "direction": "right"|"below"|"nearby", "label_len": int}
 
-    Capped at max_pairs to stay within a sensible token budget (~6k tokens).
-    Priority: sheets whose names suggest they contain summary/key data come first.
+    Quality fields (used by run_raw_insight_pass to filter noise):
+      direction: "right"/"below" = label directly precedes value — high signal
+                 "nearby" = value found in surrounding area — lower signal
+      label_len: very short labels (< 5 chars) are often headers/indices, not metrics
+
+    Capped at max_pairs. Priority sheets (summary, assumptions, waterfall) come first.
     """
     try:
         wb = openpyxl.load_workbook(file_path, data_only=True)
@@ -337,10 +341,12 @@ def extract_raw_labeled_pairs(file_path, max_pairs: int = 600) -> list[dict]:
                 seen_labels.add(key)
 
                 pairs.append({
-                    "sheet": sheet_name,
-                    "label": cell_text,
-                    "value": value,
-                    "cell": value_cell,
+                    "sheet":     sheet_name,
+                    "label":     cell_text,
+                    "value":     value,
+                    "cell":      value_cell,
+                    "direction": direction,
+                    "label_len": len(cell_text),
                 })
 
     return pairs

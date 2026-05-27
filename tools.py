@@ -157,11 +157,44 @@ def ingest_to_ssot_with_layer(filename: str, layer: str) -> dict[str, Any]:
     if "error" in extraction:
         return extraction
 
-    # --- Pass 2: GPT raw insight pass ---
+    # --- Pass 2: targeted GPT gap-fill + surface insights ---
     raw_insights: dict[str, Any] | None = None
     if llm_available():
+        # Tell GPT exactly what was found and what's still missing so it
+        # doesn't re-do deterministic work — just fills the specific gaps
+        # and surfaces non-catalog observations.
+        found_names = [m["metric_name"] for m in extraction["metrics"]]
+
+        full_catalog = load_metric_catalog()
+        layer_catalog = filter_catalog_for_layer(full_catalog, layer)
+
+        # "Expected but missing" = high-priority metrics that belong to
+        # this layer's natural data_nature (e.g. projection/mixed for UW).
+        # Actual-only metrics (CapEx Spent to Date, Current LTV, etc.) are
+        # included in the UW scan for completeness but shouldn't be listed
+        # as "expected" — they won't be in an acquisition model.
+        _natural_nature = {
+            "underwriting":  {"projection", "mixed"},
+            "business_plan": {"projection", "actual", "mixed"},
+        }
+        expected_natures = _natural_nature.get(layer, {"actual", "mixed"})
+
+        missing_names = [
+            m["metric_name"]
+            for m in layer_catalog
+            if m["metric_name"] not in found_names
+            and m.get("priority") == "High"
+            and m.get("data_nature", "mixed") in expected_natures
+        ]
+
         labeled_pairs = extract_raw_labeled_pairs(file_path)
-        raw_insights = run_raw_insight_pass(labeled_pairs, layer, filename)
+        raw_insights = run_raw_insight_pass(
+            labeled_pairs,
+            layer,
+            filename,
+            found_metric_names=found_names,
+            missing_metric_names=missing_names,
+        )
 
     # Write both passes to SSOT
     ssot.write_layer(
