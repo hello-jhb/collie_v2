@@ -103,6 +103,30 @@ def reset_ssot() -> dict[str, Any]:
 # Layer writes
 # -----------------------------------------------------------------------------
 
+def _extract_catalog_suggestions(raw_insights: dict | None) -> list[dict]:
+    """
+    Pull catalog improvement hints from Pass 2 output.
+
+    When GPT fills a gap (gap_filled section), it records what label it found
+    in the file. That label is a candidate alias to add to the metric catalog
+    so future files don't need GPT to find the same metric.
+
+    Returns a list of {metric_name, found_as_label, value, sheet} dicts.
+    """
+    if not raw_insights:
+        return []
+    suggestions = []
+    for metric_name, data in raw_insights.get("gap_filled", {}).items():
+        if isinstance(data, dict) and data.get("label_in_file"):
+            suggestions.append({
+                "metric_name":    metric_name,
+                "found_as_label": data["label_in_file"],
+                "value":          data.get("value"),
+                "sheet":          data.get("sheet"),
+            })
+    return suggestions
+
+
 def write_layer(
     layer: str,
     metrics: list[dict[str, Any]],
@@ -149,6 +173,11 @@ def write_layer(
         # and gap-filled metrics the structured extractor didn't find.
         # None if the insight pass was skipped (no API key, or file unavailable).
         "raw_insights": raw_insights or None,
+
+        # Catalog improvement suggestions — populated when Pass 2 fills gaps.
+        # Each entry: {metric_name, found_as_label, value, sheet}
+        # Review these to add missing aliases to Snapshot Metric.xlsx.
+        "catalog_suggestions": _extract_catalog_suggestions(raw_insights),
     }
 
     # Provenance log — one entry per field write.

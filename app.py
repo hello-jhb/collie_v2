@@ -222,6 +222,26 @@ def _ssot_panel() -> None:
     else:
         st.caption("(none)")
 
+    # Catalog improvement suggestions from Pass 2 GPT gap-fill.
+    # These are labels GPT found in the file that aren't in the catalog yet.
+    # Adding them as aliases means the next file won't need GPT to find them.
+    all_suggestions = []
+    s = ssot.load_ssot()
+    for layer_data in s.get("layers", {}).values():
+        all_suggestions.extend(layer_data.get("catalog_suggestions", []))
+
+    if all_suggestions:
+        with st.expander(f"💡 {len(all_suggestions)} catalog alias suggestion(s)", expanded=False):
+            st.caption(
+                "GPT found these metrics under labels not in the catalog. "
+                "Add them to Snapshot Metric.xlsx to avoid needing GPT for future files."
+            )
+            for s_ in all_suggestions:
+                st.markdown(
+                    f"**{s_['metric_name']}** — add alias: `{s_['found_as_label']}` "
+                    f"(sheet: {s_.get('sheet', '?')})"
+                )
+
 
 # =============================================================================
 # Landing view — scenario picker
