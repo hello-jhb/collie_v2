@@ -3,9 +3,19 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import sys
 import streamlit as st
 from openai import OpenAI
+
+# Logger that writes to stdout so messages appear in Streamlit Cloud logs.
+log = logging.getLogger("fb.llm")
+if not log.handlers:
+    h = logging.StreamHandler(sys.stdout)
+    h.setFormatter(logging.Formatter("[fb.llm] %(asctime)s %(levelname)s %(message)s"))
+    log.addHandler(h)
+    log.setLevel(logging.INFO)
 
 
 def _get_api_key() -> str | None:
@@ -118,8 +128,22 @@ def run_raw_insight_pass(
 
     Returns {} if LLM unavailable or call fails.
     """
-    if not client or not labeled_pairs:
+    if not client:
+        log.warning(
+            "Pass 2 SKIPPED for %s — OpenAI client is None "
+            "(OPENAI_API_KEY not set in env or Streamlit secrets)",
+            source_file,
+        )
         return {}
+    if not labeled_pairs:
+        log.warning("Pass 2 SKIPPED for %s — no labeled pairs to send", source_file)
+        return {}
+
+    log.info(
+        "Pass 2 START for %s (layer=%s) — %d pairs, %d found, %d missing",
+        source_file, layer, len(labeled_pairs),
+        len(found_metric_names or []), len(missing_metric_names or []),
+    )
 
     # Filter to high-quality pairs only:
     #   - direction right/below: label directly precedes its value (high signal)
@@ -175,11 +199,35 @@ def run_raw_insight_pass(
             ],
         )
         raw = response.choices[0].message.content.strip()
+        log.info(
+            "Pass 2 RESPONSE for %s — %d chars, finish_reason=%s",
+            source_file, len(raw), response.choices[0].finish_reason,
+        )
         # Strip markdown fences if model adds them despite instructions
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
                 raw = raw[4:]
-        return json.loads(raw)
-    except Exception:
+        parsed = json.loads(raw)
+        char = parsed.get("characterization", {}) or {}
+        gaps = parsed.get("gap_filled", {}) or {}
+        obs  = parsed.get("observations", []) or []
+        log.info(
+            "Pass 2 PARSED for %s — characterization=%d fields, gaps=%d, observations=%d",
+            source_file,
+            sum(1 for v in char.values() if v is not None),
+            len(gaps), len(obs),
+        )
+        return parsed
+    except json.JSONDecodeError as e:
+        log.error(
+            "Pass 2 JSON_PARSE_FAILED for %s — %s\nRaw response (first 500 chars): %s",
+            source_file, e, raw[:500] if 'raw' in locals() else "<no response>",
+        )
+        return {}
+    except Exception as e:
+        log.error(
+            "Pass 2 API_CALL_FAILED for %s — %s: %s",
+            source_file, type(e).__name__, str(e),
+        )
         return {}

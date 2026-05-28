@@ -22,6 +22,7 @@ from typing import Any
 import ssot
 from metric_catalog import load_metric_catalog
 import calculations
+import logging, sys
 from flexible_extractor import (
     scan_workbook_for_all_metrics,
     extract_raw_labeled_pairs,
@@ -29,6 +30,14 @@ from flexible_extractor import (
     filter_catalog_for_layer,
 )
 from scenarios._llm import run_raw_insight_pass, llm_available
+
+# Logger writes to stdout so messages show up in Streamlit Cloud logs
+_log = logging.getLogger("fb.tools")
+if not _log.handlers:
+    _h = logging.StreamHandler(sys.stdout)
+    _h.setFormatter(logging.Formatter("[fb.tools] %(asctime)s %(levelname)s %(message)s"))
+    _log.addHandler(_h)
+    _log.setLevel(logging.INFO)
 
 
 UPLOAD_DIR = Path("uploads")
@@ -156,6 +165,11 @@ def ingest_to_ssot_with_layer(filename: str, layer: str) -> dict[str, Any]:
     extraction = extract_from_file(filename, layer=layer)
     if "error" in extraction:
         return extraction
+
+    _log.info(
+        "INGEST %s as layer=%s — Pass 1 found %d metrics, llm_available=%s",
+        filename, layer, extraction["extracted_count"], llm_available(),
+    )
 
     # --- Pass 2: targeted GPT gap-fill + surface insights ---
     raw_insights: dict[str, Any] | None = None
