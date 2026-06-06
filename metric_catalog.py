@@ -6,6 +6,11 @@ import re
 CATALOG_PATH = Path("Snapshot Metric.xlsx")
 REPOSITORY_DIR = Path("repository")
 
+# Catalog version — bump whenever the schema or alias lists change in a way
+# that should invalidate cached extraction results. Used as part of the
+# versioned cache key.
+CATALOG_VERSION = "phase1.v1"
+
 
 # -----------------------------
 # Helpers
@@ -48,6 +53,19 @@ def get_col(row, col_map, possible_names):
         if key in col_map:
             return clean_text(row[col_map[key]])
     return ""
+
+
+def _parse_numeric(value):
+    """Parse a string/number cell into a float, or None if blank/non-numeric."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) if not pd.isna(value) else None
+    try:
+        # Strip commas/spaces in case the Excel cell has them
+        return float(str(value).replace(",", "").strip())
+    except (ValueError, TypeError):
+        return None
 
 
 # -----------------------------
@@ -219,9 +237,20 @@ def load_metric_catalog(path=CATALOG_PATH):
         aliases_text = get_col(row, col_map, ["Aliases", "Search Terms"])
         core_question= get_col(row, col_map, ["Core Question", "Used For Core Question"])
         priority     = get_col(row, col_map, ["Priority"])
-        # New columns added during v2 catalog cleanup
+        # v2 fields
         data_nature  = get_col(row, col_map, ["Data Nature", "data_nature"])
         metric_source= get_col(row, col_map, ["Metric Source", "metric_source"]) or "extracted"
+
+        # Phase 1 schema fields — drive the candidate-based extractor and validator.
+        unit         = get_col(row, col_map, ["unit", "Unit"])
+        scale        = get_col(row, col_map, ["scale", "Scale"])
+        period       = get_col(row, col_map, ["period", "Period"])
+        range_min    = _parse_numeric(get_col(row, col_map, ["range_min", "Range Min"]))
+        range_max    = _parse_numeric(get_col(row, col_map, ["range_max", "Range Max"]))
+        preferred_sheets_text = get_col(row, col_map, ["preferred_sheets", "Preferred Sheets"])
+        preferred_sheets = split_list(preferred_sheets_text)
+        in_bounded_list_raw = get_col(row, col_map, ["in_bounded_list", "In Bounded List"])
+        in_bounded_list = str(in_bounded_list_raw).strip().lower() in ("true", "1", "yes", "y")
 
         aliases = build_aliases(metric_name, aliases_text)
 
@@ -239,8 +268,16 @@ def load_metric_catalog(path=CATALOG_PATH):
             "core_question": core_question,
             "priority":      priority,
             # v2 fields
-            "data_nature":   data_nature,   # projection | actual | mixed
-            "metric_source": metric_source, # extracted | calculated
+            "data_nature":   data_nature,
+            "metric_source": metric_source,
+            # Phase 1 schema fields
+            "unit":              unit or None,
+            "scale":             scale or None,
+            "period":            period or None,
+            "range_min":         range_min,
+            "range_max":         range_max,
+            "preferred_sheets":  preferred_sheets,
+            "in_bounded_list":   in_bounded_list,
         }
 
         catalog.append(metric)

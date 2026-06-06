@@ -551,6 +551,123 @@ def scan_workbook_for_all_metrics(file_path, catalog):
     return best
 
 
+# =============================================================================
+# Phase 1 — candidate-based extraction
+# =============================================================================
+#
+# scan_workbook_for_candidates returns ALL matches per metric (not just the
+# best one). Downstream code applies schema-aware ranking to pick the right
+# candidate — or in Phase 2, an LLM resolver disambiguates when multiple
+# candidates pass schema checks.
+#
+# Same scan loop as scan_workbook_for_all_metrics, but stores candidates
+# unfiltered.
+
+EXTRACTOR_VERSION = "phase1.v1"
+
+
+def scan_workbook_for_candidates(file_path, catalog):
+    """
+    Find ALL candidate matches per metric across the workbook.
+
+    Returns {metric_id: [list of candidate dicts]}, where each candidate is:
+        {
+          metric_id, metric_name, category,
+          value, source_file, sheet, sheet_tier,
+          label_cell, value_cell,
+          matched_alias, confidence, label_ratio, match_method,
+        }
+
+    Candidates are sorted by (sheet_tier, confidence, label_ratio) so the
+    caller can take the top one if they don't need richer ranking.
+    """
+    try:
+        wb = openpyxl.load_workbook(file_path, data_only=True)
+    except Exception:
+        return {m["metric_id"]: [] for m in catalog}
+
+    alias_index = []
+    for metric in catalog:
+        for alias in metric.get("aliases", []):
+            alias_text = normalize_text(alias)
+            if alias_text:
+                alias_index.append((alias_text, metric, alias))
+
+    candidates_by_metric: dict = {m["metric_id"]: [] for m in catalog}
+    file_name = Path(file_path).name
+
+    candidate_sheets = sorted_sheets_by_priority(wb.sheetnames, exclude_skipped=True)
+
+    for sheet_name in candidate_sheets:
+        sheet_tier = sheet_priority_tier(sheet_name)
+        ws = wb[sheet_name]
+
+        for row in ws.iter_rows(
+            min_row=1, max_row=_MAX_ROWS_PER_SHEET,
+            min_col=1, max_col=_MAX_COLS_PER_SHEET,
+        ):
+            for cell in row:
+                cell_text = normalize_text(cell.value)
+                if not cell_text:
+                    continue
+
+                for alias_text, metric, original_alias in alias_index:
+                    if alias_text not in cell_text:
+                        continue
+
+                    # Label quality + mid-word filtering (same logic as scan_workbook_for_all_metrics)
+                    label_ratio = len(alias_text) / max(len(cell_text), 1)
+                    idx = cell_text.find(alias_text)
+                    char_before = cell_text[idx - 1] if idx > 0 else " "
+                    char_after  = cell_text[idx + len(alias_text)] if idx + len(alias_text) < len(cell_text) else " "
+                    if char_before.isalpha() or char_after.isalpha():
+                        continue
+
+                    value, value_cell, direction = find_nearby_value(
+                        ws, cell.row, cell.column,
+                        metric_name=metric["metric_name"],
+                    )
+                    if value is None:
+                        continue
+
+                    if direction in ("right", "below", "table-column"):
+                        confidence = "exact" if label_ratio >= 0.8 else "high"
+                    else:
+                        confidence = "partial" if label_ratio < 0.4 else "medium"
+
+                    candidates_by_metric[metric["metric_id"]].append({
+                        "metric_id":     metric["metric_id"],
+                        "metric_name":   metric["metric_name"],
+                        "category":      metric["category"],
+                        "value":         value,
+                        "source_file":   file_name,
+                        "sheet":         sheet_name,
+                        "sheet_tier":    sheet_tier,
+                        "label_cell":    cell.coordinate,
+                        "value_cell":    value_cell,
+                        "matched_alias": original_alias,
+                        "confidence":    confidence,
+                        "label_ratio":   round(label_ratio, 2),
+                        "match_method":  direction,
+                    })
+
+    # Sort each metric's candidates by (sheet_tier, confidence_tier, -label_ratio)
+    _CONF_TIER = {"exact": 0, "high": 1, "medium": 2, "partial": 3}
+    for metric_id, cands in candidates_by_metric.items():
+        cands.sort(key=lambda x: (
+            x.get("sheet_tier", 99),
+            _CONF_TIER.get(x["confidence"], 9),
+            -x.get("label_ratio", 0),
+        ))
+
+    try:
+        wb.close()
+    except Exception:
+        pass
+
+    return candidates_by_metric
+
+
 def scan_workbook_for_metric(file_path, metric):
     """
     Search one Excel workbook for one metric.
