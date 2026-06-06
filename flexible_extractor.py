@@ -638,13 +638,13 @@ def extract_raw_labeled_pairs(file_path, max_pairs: int = 600) -> list[dict]:
 
     Capped at max_pairs. Priority sheets (summary, assumptions, waterfall) come first.
     """
+    # Do NOT use read_only — find_nearby_value does random cell access which
+    # is catastrophically slow in read_only mode (every ws.cell(row,col) call
+    # requires a file seek). Same fix as in scan_workbook_for_all_metrics.
     try:
-        wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
+        wb = openpyxl.load_workbook(file_path, data_only=True)
     except Exception:
-        try:
-            wb = openpyxl.load_workbook(file_path, data_only=True)
-        except Exception:
-            return []
+        return []
 
     # Use the centralized priority taxonomy — skip-tier sheets are excluded entirely
     sorted_sheets = sorted_sheets_by_priority(wb.sheetnames, exclude_skipped=True)
