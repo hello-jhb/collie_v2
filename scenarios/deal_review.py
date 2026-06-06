@@ -37,24 +37,34 @@ SYSTEM_PROMPT = """\
 You are a senior real estate investment professional writing an acquisition memo.
 The user is an institutional asset manager evaluating whether to fund this deal.
 
-You have THREE inputs:
-  1. CATALOG-VERIFIED FACTS — numbers extracted from the file by a deterministic
-     pipeline, each with a cell reference. These are trustworthy. Cite them.
-  2. PASS 2 INFERRED FIELDS — fields GPT inferred from the file structure
-     (property type, deal type, total debt, etc.). Less certain than catalog
-     facts but still grounded in the data.
-  3. TIME SERIES — multi-year projections (NOI, revenue, expenses, cash flow)
-     showing how the deal evolves. Use these to construct the NOI/cash flow
-     trajectory and identify going-in vs stabilized periods.
+You have FOUR inputs:
+  1. ANALYST CHECKLIST — BOUNDED METRICS (PRIMARY): the 25 metrics on an analyst's
+     deal-review checklist, each carrying a status:
+       VERIFIED        — single high-confidence candidate; safe to cite as fact.
+       CANDIDATE_POOL  — multiple candidates passed validation; top-ranked taken.
+                         Cite with cell reference; do NOT add editorial certainty.
+       SUSPICIOUS      — failed schema validation. DO NOT cite as fact. Represent
+                         in memo as "data quality issue" or omit field.
+       MISSING         — no candidate found. Represent as "—" or omit field.
+  2. LEGACY CATALOG FACTS — non-bounded metrics with cell references. Secondary
+     source, only used for metrics not in the bounded checklist.
+  3. PASS 2 INFERRED FIELDS — fields GPT inferred at ingest (property type, deal
+     type, total debt). Note as "(inferred)" when cited.
+  4. TIME SERIES — multi-year projections (NOI, revenue, expenses, cash flow)
+     showing how the deal evolves. Use these for the NOI / cash flow trajectory.
+
+CITATION RULES (NON-NEGOTIABLE):
+- VERIFIED and CANDIDATE_POOL bounded metrics: cite with cell reference
+  "$192M (General Information!C11)".
+- SUSPICIOUS bounded metrics: NEVER cite the value. Note as "data quality issue"
+  or omit the field entirely. The user is alerted via the audit-trail section.
+- MISSING bounded metrics: write "—" or omit the field. Never invent.
+- Inferred (Pass 2) fields: cite as "Multifamily (inferred)" — no cell ref.
 
 YOUR JOB: write a clear, readable memo that an investment committee would actually
 use. Not a form. Not a checklist. A memo.
 
 STYLE RULES:
-- Cite specific numbers with cell references when possible: "$28.8M (Summary!L22)"
-- Inferred values get noted as "(inferred)" without a cell reference
-- Adapt sections to the deal type. A ground-up dev needs lease-up timing; a core
-  acquisition needs T12 vs UW comparison.
 - Be specific. Every risk must reference a specific number, not generic warnings.
 - Use markdown. Tables are fine where they clarify (e.g., sources & uses).
 - ~500–900 words total. No filler.
@@ -97,9 +107,15 @@ the data. Generic risks ("market risk", "interest rate risk") are forbidden
 unless tied to an actual model assumption.
 
 ## Verified Data Appendix
-Bullet list of every catalog-extracted fact with cell reference. This is the
-audit trail — every cited number in the memo above can be traced here.
-Format: `**Metric Name**: $X,XXX,XXX (Sheet!Cell)`
+Bullet list of every bounded-checklist fact, grouped by status:
+  - Verified facts (single high-confidence source)
+  - Candidate pool facts (multi-candidate, top-ranked taken)
+  - Data quality issues (suspicious — flagged, not cited as fact)
+  - Missing fields (no candidate found in file)
+This is the audit trail — every cited number in the memo above can be traced
+here, AND the user sees explicitly what didn't survive validation.
+Format: `**Metric Name**: $X,XXX,XXX (Sheet!Cell)` or
+        `**Metric Name**: SUSPICIOUS — <reason>`
 """
 
 
@@ -176,6 +192,65 @@ def _format_catalog_facts(metrics: dict) -> str:
     return "\n".join(lines) if lines else "  (no catalog facts extracted)"
 
 
+def _format_bounded_metrics(bounded: dict) -> str:
+    """
+    Render Phase 1 bounded metrics grouped by status, with cell provenance and
+    explicit data-quality flags. This is the PRIMARY input to the memo —
+    catalog-verified numbers with audit-grade citations.
+    """
+    if not bounded:
+        return "(No bounded-metric extraction available — Phase 1 pipeline did not run.)"
+
+    # Group by status
+    verified, pool, suspicious, missing = [], [], [], []
+    for name, rec in bounded.items():
+        status = rec.get("status")
+        if status == "verified":
+            verified.append((name, rec))
+        elif status == "candidate_pool":
+            pool.append((name, rec))
+        elif status == "suspicious":
+            suspicious.append((name, rec))
+        elif status == "missing":
+            missing.append((name, rec))
+
+    def _fmt_record(name, rec):
+        val = rec["display_value"]
+        sheet = rec.get("source_sheet")
+        cell = rec.get("source_cell")
+        cell_ref = f"{sheet}!{cell}" if sheet and cell else "—"
+        period = rec.get("period")
+        period_tag = f" [{period}]" if period and period != "n/a" else ""
+        return f"  - **{name}**{period_tag}: {val}  ({cell_ref})"
+
+    lines = []
+    if verified:
+        lines.append("VERIFIED (single high-confidence candidate; safe to cite):")
+        for name, rec in verified:
+            lines.append(_fmt_record(name, rec))
+        lines.append("")
+    if pool:
+        lines.append("CANDIDATE POOL (multiple candidates passed schema; "
+                     "top-ranked taken — cite with cell ref, no editorial certainty):")
+        for name, rec in pool:
+            lines.append(_fmt_record(name, rec))
+        lines.append("")
+    if suspicious:
+        lines.append("SUSPICIOUS (failed schema validation — DO NOT cite as fact, "
+                     "represent as data quality issue):")
+        for name, rec in suspicious:
+            notes = "; ".join(rec.get("validation_notes", []))[:160]
+            lines.append(f"  - **{name}**: {rec['display_value']}  — {notes}")
+        lines.append("")
+    if missing:
+        lines.append("MISSING (no candidates found in scanned sheets — represent as '—'):")
+        for name, _ in missing:
+            lines.append(f"  - **{name}**")
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
 def _format_pass2_fields(raw_insights: dict) -> str:
     """Render Pass 2 found fields as a list."""
     if not raw_insights:
@@ -232,6 +307,9 @@ def generate_deal_review() -> dict[str, Any]:
     observations = raw_insights.get("observations", []) or []
     model_summary = raw_insights.get("model_summary", "") or ""
 
+    # Phase 1 — bounded analyst-checklist metrics with schema validation
+    bounded_metrics = underwriting.get("bounded_metrics", {}) or {}
+
     # Build the user prompt
     user_prompt = f"""\
 ASSET: {source_file or 'Unknown'}
@@ -239,7 +317,13 @@ INGESTED: {underwriting.get('ingested_at', 'Unknown')}
 
 {f'PASS 2 MODEL SUMMARY: {model_summary}' if model_summary else ''}
 
-===== CATALOG-VERIFIED FACTS (cite these with cell references) =====
+===== ANALYST CHECKLIST — BOUNDED METRICS (PRIMARY SOURCE) =====
+These 25 metrics are the analyst's deal-review checklist, each schema-validated
+with explicit provenance. Status-based citation rules apply (see system prompt).
+
+{_format_bounded_metrics(bounded_metrics)}
+
+===== LEGACY CATALOG FACTS (secondary — use only for metrics not in the bounded list above) =====
 
 {_format_catalog_facts(catalog_metrics)}
 
@@ -256,7 +340,7 @@ INGESTED: {underwriting.get('ingested_at', 'Unknown')}
 
 Now write the deal memo following the structure in your system prompt.
 Adapt sections to this deal's type. Be specific. Cite cell references where
-catalog facts are used.
+catalog facts are used. NEVER cite SUSPICIOUS or MISSING values as fact.
 """
 
     narrative = complete(SYSTEM_PROMPT, user_prompt, temperature=0.2)
@@ -264,12 +348,20 @@ catalog facts are used.
     # Memorialize the acquisition (write-once)
     _memorialize_acquisition(s, narrative, filtered, underwriting)
 
+    # Bounded-metric status breakdown for diagnostics
+    bounded_status_counts: dict[str, int] = {}
+    for rec in bounded_metrics.values():
+        s = rec.get("status", "unknown")
+        bounded_status_counts[s] = bounded_status_counts.get(s, 0) + 1
+
     return {
         "scenario": "deal_review",
         "narrative": narrative,
         "data_used": {
             "layers": ["underwriting"],
             "source_files": [source_file] if source_file else [],
+            "bounded_metric_count": len(bounded_metrics),
+            "bounded_status_counts": bounded_status_counts,
             "catalog_metric_count": len(catalog_metrics),
             "pass2_field_count": len(raw_insights.get("found", {}) if raw_insights else {}),
             "time_series_rows": len(time_series_block.splitlines()) if time_series_block else 0,

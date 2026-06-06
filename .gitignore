@@ -37,3 +37,6 @@ Thumbs.db
 # Claude Code worktrees
 # ============================================================
 .claude/worktrees/
+
+# Phase 1 extraction cache (file-hash keyed; can be regenerated from source files)
+cache/extractions/

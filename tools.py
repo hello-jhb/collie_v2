@@ -25,11 +25,16 @@ import calculations
 import logging, sys
 from flexible_extractor import (
     scan_workbook_for_all_metrics,
+    scan_workbook_for_candidates,
     extract_raw_labeled_pairs,
     classify_file_layer,
     filter_catalog_for_layer,
     sheet_priority_tier,
+    EXTRACTOR_VERSION,
 )
+from metric_catalog import CATALOG_VERSION
+from metric_resolver import resolve_metric, make_cache_key, RESOLVER_VERSION
+import extraction_cache
 from scenarios._llm import run_raw_insight_pass, llm_available
 
 # Logger writes to stdout so messages show up in Streamlit Cloud logs
@@ -318,6 +323,79 @@ def _inventory_sheets_by_tier(file_path: Path) -> dict[str, Any]:
         return {"by_tier": {}, "skipped_sheets": [], "low_priority_sheets": [], "all_sheets": []}
 
 
+def _run_bounded_extraction(file_path: Path, layer: str) -> tuple[dict, str, bool]:
+    """
+    Phase 1 — extract the 25 bounded analyst-checklist metrics with schema
+    validation and ranked candidate selection.
+
+    Returns:
+      (bounded_metrics, cache_key, was_cache_hit)
+
+      bounded_metrics: { metric_name: record_dict, ... }
+      cache_key:       the versioned cache key used (for diagnostics)
+      was_cache_hit:   True if the result came from cache, False if computed
+    """
+    from metric_catalog import load_metric_catalog
+
+    catalog = load_metric_catalog()
+    bounded = [m for m in catalog if m.get("in_bounded_list")]
+
+    # Compute cache key from file hash + all four version constants
+    file_hash = extraction_cache.file_sha256(file_path)
+    cache_key = make_cache_key(
+        file_hash=file_hash,
+        catalog_version=CATALOG_VERSION,
+        extractor_version=EXTRACTOR_VERSION,
+        resolver_version=RESOLVER_VERSION,
+    )
+
+    cached = extraction_cache.load_cached(cache_key)
+    if cached and isinstance(cached.get("bounded_metrics"), dict):
+        _log.info(
+            "BOUNDED-METRICS cache HIT for %s (key=%s, %d metrics)",
+            file_path.name, cache_key[:12], len(cached["bounded_metrics"]),
+        )
+        return cached["bounded_metrics"], cache_key, True
+
+    _log.info(
+        "BOUNDED-METRICS cache MISS for %s (key=%s) — running extraction on %d metrics",
+        file_path.name, cache_key[:12], len(bounded),
+    )
+
+    candidates_by_metric = scan_workbook_for_candidates(file_path, bounded)
+
+    bounded_metrics: dict[str, Any] = {}
+    for metric in bounded:
+        cands = candidates_by_metric.get(metric["metric_id"], [])
+        record = resolve_metric(metric, cands)
+        # Trim candidate list to keep cache size sane — keep top 5 only
+        record["candidates"] = record["candidates"][:5]
+        bounded_metrics[metric["metric_name"]] = record
+
+    # Cache the result
+    extraction_cache.save_cache(
+        cache_key=cache_key,
+        file_name=file_path.name,
+        file_hash=file_hash,
+        catalog_version=CATALOG_VERSION,
+        extractor_version=EXTRACTOR_VERSION,
+        resolver_version=RESOLVER_VERSION,
+        bounded_metrics=bounded_metrics,
+    )
+
+    # Counts for diagnostic logging
+    statuses: dict[str, int] = {}
+    for r in bounded_metrics.values():
+        statuses[r["status"]] = statuses.get(r["status"], 0) + 1
+    _log.info(
+        "BOUNDED-METRICS done for %s — %s",
+        file_path.name,
+        ", ".join(f"{k}={v}" for k, v in sorted(statuses.items())),
+    )
+
+    return bounded_metrics, cache_key, False
+
+
 def ingest_to_ssot_with_layer(filename: str, layer: str) -> dict[str, Any]:
     """
     Classify + extract + GPT insight pass + write to SSOT.
@@ -353,7 +431,7 @@ def ingest_to_ssot_with_layer(filename: str, layer: str) -> dict[str, Any]:
         len(sheet_inventory["all_sheets"]) - len(sheet_inventory["skipped_sheets"]),
     )
 
-    # --- Pass 1: deterministic metric extraction ---
+    # --- Pass 1: deterministic metric extraction (legacy single-best-match path)
     t0 = time.time()
     extraction = extract_from_file(filename, layer=layer)
     t_pass1 = time.time() - t0
@@ -363,6 +441,23 @@ def ingest_to_ssot_with_layer(filename: str, layer: str) -> dict[str, Any]:
     _log.info(
         "INGEST %s — Pass 1 done in %.1fs (%d metrics found, llm=%s)",
         filename, t_pass1, extraction["extracted_count"], llm_available(),
+    )
+
+    # --- Phase 1 bounded-metric extraction (schema-validated candidate ranking)
+    # Runs alongside the legacy path so both old and new SSOT consumers work.
+    t0 = time.time()
+    try:
+        bounded_metrics, bounded_cache_key, bounded_cache_hit = _run_bounded_extraction(
+            file_path, layer
+        )
+    except Exception as e:
+        _log.error("BOUNDED-METRICS failed for %s — %s: %s", filename, type(e).__name__, e)
+        bounded_metrics, bounded_cache_key, bounded_cache_hit = {}, "", False
+    t_bounded = time.time() - t0
+    _log.info(
+        "INGEST %s — bounded extraction done in %.1fs (%d metrics, cache_%s)",
+        filename, t_bounded, len(bounded_metrics),
+        "HIT" if bounded_cache_hit else "MISS",
     )
 
     # --- Pass 2: targeted GPT gap-fill + surface insights ---
@@ -390,14 +485,15 @@ def ingest_to_ssot_with_layer(filename: str, layer: str) -> dict[str, Any]:
         t_pass2 = time.time() - t0
         _log.info("INGEST %s — Pass 2 (GPT) done in %.1fs", filename, t_pass2)
 
-    # Write both passes to SSOT (sheet inventory included so the agent can see
-    # which sheets exist but were intentionally not bulk-extracted)
+    # Write both passes + bounded metrics to SSOT (sheet inventory included so
+    # the agent can see which sheets exist but were intentionally not bulk-extracted)
     ssot.write_layer(
         layer=layer,
         metrics=extraction["metrics"],
         source_file=filename,
         raw_insights=raw_insights,
         sheet_inventory=sheet_inventory,
+        bounded_metrics=bounded_metrics,
     )
 
     # Recompute derived metrics now that SSOT has new data
@@ -405,6 +501,11 @@ def ingest_to_ssot_with_layer(filename: str, layer: str) -> dict[str, Any]:
 
     t_total = time.time() - t_start
     _log.info("INGEST %s — TOTAL %.1fs", filename, t_total)
+
+    # Phase 1 status breakdown for the ingest-result message
+    bounded_status_counts: dict[str, int] = {}
+    for r in bounded_metrics.values():
+        bounded_status_counts[r["status"]] = bounded_status_counts.get(r["status"], 0) + 1
 
     return {
         "filename":             filename,
@@ -418,6 +519,10 @@ def ingest_to_ssot_with_layer(filename: str, layer: str) -> dict[str, Any]:
         # Sheets the agent can re-read on demand for follow-up questions
         "skipped_sheets":       sheet_inventory["skipped_sheets"],
         "low_priority_sheets":  sheet_inventory["low_priority_sheets"],
+        # Phase 1 bounded-metric summary
+        "bounded_metric_count":  len(bounded_metrics),
+        "bounded_status_counts": bounded_status_counts,
+        "bounded_cache":         "HIT" if bounded_cache_hit else "MISS",
     }
 
 
