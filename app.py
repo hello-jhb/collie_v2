@@ -119,20 +119,41 @@ st.markdown(
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
-for key, default in [
-    ("active_scenario", None),
-    ("agent_session", None),
-    ("uploaded_filenames", set()),
-    ("last_auto_message", None),
+# Default values for every session_state key the app uses. Defined as a single
+# dict so we can both initialize on first load AND defensively fall back to
+# defaults if any key is missing later (e.g. after a Streamlit error / rerun
+# that somehow lost state).
+_SESSION_DEFAULTS: dict = {
+    "active_scenario":    None,
+    "agent_session":      None,
+    "uploaded_filenames": set(),
+    "last_auto_message":  None,
     # Files whose auto-classification failed and are awaiting a user choice.
     # Shape: {filename: error_message}
-    ("pending_overrides", {}),
-    # Set of batches (frozensets of filenames) we've already run the scenario for,
-    # so we don't re-trigger on every Streamlit rerun.
-    ("completed_batches", set()),
-]:
-    if key not in st.session_state:
-        st.session_state[key] = default
+    "pending_overrides":  {},
+    # Set of batches (frozensets of filenames) we've already run the scenario for.
+    "completed_batches":  set(),
+}
+
+
+def _ensure_session_state() -> None:
+    """
+    Initialize every session_state key that doesn't already exist.
+    Called both at module load AND defensively at the top of every render
+    function so a missing-attr error can never trigger from these keys.
+    """
+    for key, default in _SESSION_DEFAULTS.items():
+        if key not in st.session_state:
+            # Use a fresh copy of mutable defaults so all sessions don't share
+            # the same dict/set instance.
+            if isinstance(default, (set, dict, list)):
+                st.session_state[key] = type(default)()
+            else:
+                st.session_state[key] = default
+
+
+# Run once on module load — every script rerun re-executes this module
+_ensure_session_state()
 
 
 # Layer options the user can pick from the manual-override dropdown.
@@ -248,6 +269,7 @@ def _ssot_panel() -> None:
 # =============================================================================
 
 def render_landing() -> None:
+    _ensure_session_state()  # defensive safety net
     st.markdown(
         '<div class="hero-title">Fantastic Beast & Where to Find Them</div>',
         unsafe_allow_html=True,
@@ -336,6 +358,11 @@ def render_landing() -> None:
 # =============================================================================
 
 def render_scenario() -> None:
+    # Defensive: ensure all session_state keys exist before any access.
+    # Streamlit *should* keep them across reruns, but a partial-execution
+    # error can occasionally leave state in a half-initialized place.
+    _ensure_session_state()
+
     scenario_key = st.session_state.active_scenario
     cfg = SCENARIO_CONFIG[scenario_key]
     agent: AgentSession = st.session_state.agent_session
@@ -395,7 +422,7 @@ def render_scenario() -> None:
 
     # Phase 2: if files need manual classification, show the override form
     # and stop — we can't run the scenario until layers are resolved.
-    if st.session_state.pending_overrides:
+    if st.session_state.get("pending_overrides"):
         _render_manual_override_ui()
         # Still allow follow-up Q&A while waiting on overrides
         user_input = st.chat_input("Ask a follow-up question...")
@@ -560,7 +587,7 @@ def _render_manual_override_ui() -> None:
 
     with st.form(key="manual_override_form"):
         choices: dict[str, str] = {}
-        for filename in sorted(st.session_state.pending_overrides):
+        for filename in sorted(st.session_state.get("pending_overrides", {})):
             choices[filename] = st.selectbox(
                 f"📄 {filename}",
                 options=_MANUAL_LAYER_OPTIONS,
