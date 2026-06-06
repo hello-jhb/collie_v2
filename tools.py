@@ -28,6 +28,7 @@ from flexible_extractor import (
     extract_raw_labeled_pairs,
     classify_file_layer,
     filter_catalog_for_layer,
+    sheet_priority_tier,
 )
 from scenarios._llm import run_raw_insight_pass, llm_available
 
@@ -286,6 +287,37 @@ def _build_fields_to_find(layer: str, found_metric_names: list[str]) -> list[dic
     return [f for f in base if not already_found(f["name"])]
 
 
+def _inventory_sheets_by_tier(file_path: Path) -> dict[str, Any]:
+    """
+    Inventory the file's sheets by priority tier. Returns:
+        {
+          "by_tier": {1: [...], 2: [...], ..., 6: [...], 99: [...]},
+          "skipped_sheets": [list of sheets the catalog scan SKIPPED],
+          "low_priority_sheets": [list of Tier 6 sheets — scanned but lowest priority],
+          "all_sheets": [list of every sheet name in the file],
+        }
+
+    Used so the chat agent knows which sheets exist but weren't bulk-extracted —
+    it can call read_sheet/search_file on these for follow-up questions.
+    """
+    try:
+        import openpyxl
+        wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
+        by_tier: dict[int, list[str]] = {}
+        for s in wb.sheetnames:
+            t = sheet_priority_tier(s)
+            by_tier.setdefault(t, []).append(s)
+        wb.close()
+        return {
+            "by_tier":             by_tier,
+            "skipped_sheets":      by_tier.get(99, []),
+            "low_priority_sheets": by_tier.get(6, []),
+            "all_sheets":          [s for sheets in by_tier.values() for s in sheets],
+        }
+    except Exception:
+        return {"by_tier": {}, "skipped_sheets": [], "low_priority_sheets": [], "all_sheets": []}
+
+
 def ingest_to_ssot_with_layer(filename: str, layer: str) -> dict[str, Any]:
     """
     Classify + extract + GPT insight pass + write to SSOT.
@@ -304,14 +336,22 @@ def ingest_to_ssot_with_layer(filename: str, layer: str) -> dict[str, Any]:
 
     file_path = UPLOAD_DIR / filename
 
+    # --- Inventory all sheets by tier so the chat agent knows what's available
+    # for on-demand reads (sensitivities, scenarios, comps were intentionally
+    # skipped during bulk extraction but they're still in the file).
+    sheet_inventory = _inventory_sheets_by_tier(file_path)
+
     # --- Pass 1: deterministic metric extraction ---
     extraction = extract_from_file(filename, layer=layer)
     if "error" in extraction:
         return extraction
 
     _log.info(
-        "INGEST %s as layer=%s — Pass 1 found %d metrics, llm_available=%s",
+        "INGEST %s as layer=%s — Pass 1 found %d metrics, llm_available=%s, "
+        "skipped_sheets=%d, low_priority_sheets=%d",
         filename, layer, extraction["extracted_count"], llm_available(),
+        len(sheet_inventory["skipped_sheets"]),
+        len(sheet_inventory["low_priority_sheets"]),
     )
 
     # --- Pass 2: targeted GPT gap-fill + surface insights ---
@@ -338,26 +378,31 @@ def ingest_to_ssot_with_layer(filename: str, layer: str) -> dict[str, Any]:
             fields_to_find=fields_to_find,
         )
 
-    # Write both passes to SSOT
+    # Write both passes to SSOT (sheet inventory included so the agent can see
+    # which sheets exist but were intentionally not bulk-extracted)
     ssot.write_layer(
         layer=layer,
         metrics=extraction["metrics"],
         source_file=filename,
         raw_insights=raw_insights,
+        sheet_inventory=sheet_inventory,
     )
 
     # Recompute derived metrics now that SSOT has new data
     calc_result = calculations.calculate_derived_metrics()
 
     return {
-        "filename":           filename,
-        "layer":              layer,
-        "metric_count":       extraction["extracted_count"],
-        "scanned_count":      extraction.get("scanned_count", extraction["extracted_count"]),
-        "catalog_size":       extraction["catalog_size"],
-        "layers_now_present": ssot.list_layers(),
-        "calculated":         calc_result["computed"],
-        "insight_pass":       "completed" if raw_insights else "skipped (no API key)",
+        "filename":             filename,
+        "layer":                layer,
+        "metric_count":         extraction["extracted_count"],
+        "scanned_count":        extraction.get("scanned_count", extraction["extracted_count"]),
+        "catalog_size":         extraction["catalog_size"],
+        "layers_now_present":   ssot.list_layers(),
+        "calculated":           calc_result["computed"],
+        "insight_pass":         "completed" if raw_insights else "skipped (no API key)",
+        # Sheets the agent can re-read on demand for follow-up questions
+        "skipped_sheets":       sheet_inventory["skipped_sheets"],
+        "low_priority_sheets":  sheet_inventory["low_priority_sheets"],
     }
 
 
@@ -371,15 +416,23 @@ def get_ssot_summary() -> dict[str, Any]:
 
 
 def get_layer_details(layer: str) -> dict[str, Any]:
-    """Return all metrics stored in one SSOT layer."""
+    """Return all metrics stored in one SSOT layer, plus the sheet inventory."""
     layer_data = ssot.read_layer(layer)
     if not layer_data:
         return {"error": f"Layer '{layer}' is not present in SSOT yet."}
+
+    inventory = layer_data.get("sheet_inventory") or {}
     return {
-        "layer": layer,
-        "source_file": layer_data["source_file"],
-        "metric_count": layer_data["metric_count"],
-        "metrics": layer_data["metrics"],
+        "layer":         layer,
+        "source_file":   layer_data["source_file"],
+        "metric_count":  layer_data["metric_count"],
+        "metrics":       layer_data["metrics"],
+        # Sheets the catalog intentionally skipped during bulk extraction —
+        # the agent should use read_sheet/search_file to inspect these when
+        # the user asks about sensitivities, scenarios, comps, etc.
+        "skipped_sheets":      inventory.get("skipped_sheets", []),
+        "low_priority_sheets": inventory.get("low_priority_sheets", []),
+        "all_sheets":          inventory.get("all_sheets", []),
     }
 
 

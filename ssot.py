@@ -134,6 +134,7 @@ def write_layer(
     source_file: str,
     ssot: dict[str, Any] | None = None,
     raw_insights: dict[str, Any] | None = None,
+    sheet_inventory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Write a layer's worth of metrics into the SSOT.
@@ -179,6 +180,13 @@ def write_layer(
         # Each entry: {metric_name, found_as_label, value, sheet}
         # Review these to add missing aliases to Snapshot Metric.xlsx.
         "catalog_suggestions": _extract_catalog_suggestions(raw_insights),
+
+        # Sheet inventory — which sheets exist in the source file and what
+        # priority tier they were classified into. The chat agent reads this
+        # to know which sheets were intentionally skipped during bulk extraction
+        # (sensitivities, scenarios, comps, backups) so it can re-read them
+        # on demand via read_sheet/search_file for follow-up questions.
+        "sheet_inventory": sheet_inventory or None,
     }
 
     # Provenance log — one entry per field write.
