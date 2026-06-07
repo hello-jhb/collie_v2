@@ -61,61 +61,69 @@ CITATION RULES (NON-NEGOTIABLE):
 - MISSING bounded metrics: write "—" or omit the field. Never invent.
 - Inferred (Pass 2) fields: cite as "Multifamily (inferred)" — no cell ref.
 
-YOUR JOB: write a clear, readable memo that an investment committee would actually
-use. Not a form. Not a checklist. A memo.
+YOUR JOB: write a CONCISE deal snapshot. Three sections only: Snapshot,
+Investment Thesis (2 bullets), Data Appendix. The user will request deep
+dives (capital structure, cash flow, returns, capex, risks) via separate
+buttons — do NOT include those sections in this output.
 
 STYLE RULES:
-- Be specific. Every risk must reference a specific number, not generic warnings.
-- Use markdown. Tables are fine where they clarify (e.g., sources & uses).
-- ~500–900 words total. No filler.
-- If a section has no meaningful content for THIS deal, omit it entirely.
-  Do not write "—" or "N/A".
+- Snapshot: 3-5 sentences. Investment Thesis: EXACTLY 2 bullets. Appendix: data only.
+- Total output target: 250-400 words. Tight, executive-style.
+- Use markdown.
+- For Data Appendix metrics that are missing/suspicious, follow the explicit
+  formatting rules below — do not silently omit them, the appendix is the audit.
 
-STRUCTURE (skip or merge sections as the deal warrants):
+STRUCTURE (write ONLY these three sections):
 
 ## Snapshot
-One paragraph: asset name, location, property type, size, deal type, basis,
-debt/equity split, target return, hold period. This is the elevator pitch.
+One concise paragraph (3-5 sentences). Cover: asset name + property type (with
+number of properties if portfolio), location, size (units / SF / keys),
+acquisition date, purchase price, target hold, headline return (Levered IRR).
+This is the elevator pitch. No filler.
 
 ## Investment Thesis
-2–3 paragraphs answering: what is the deal, what's the play, why does this work?
-Be specific about value creation drivers (lease-up, rent uplift, cap rate
-compression, ground-up build-to-stabilization, etc.).
+EXACTLY 2 sentences, bullet style. No paragraphs.
+- Bullet 1: opportunity framing — what type of asset, what market, what makes
+  it attractive in one sentence. Example: "Opportunity to invest in well-located
+  Class-A multifamily in Glendale, CA submarket with strong rent fundamentals."
+- Bullet 2: strategy + lever — Core / Core-Plus / Value-Add / Opportunistic /
+  Ground-up Development, plus the specific value creation lever in one
+  sentence. Example: "Value-Add play leveraging unit renovations and lease-up
+  of vacant inventory to drive ~$2.5M NOI uplift."
 
-## Capital Structure
-Sources & uses if a development or value-add deal (where post-close capital
-is material). Debt terms (amount, rate, term, IO period, future funding).
-Equity structure (LP/GP split, pref, promote) if disclosed.
+## Data Appendix
+Render this exact list in this exact order. Each line:
+`**Metric**: <display value> (<sheet>!<cell>)` if verified or candidate_pool.
+For suspicious: `**Metric**: SUSPICIOUS — <reason>`.
+For missing: `**Metric**: —`.
 
-## Cash Flow / NOI Trajectory
-Walk through how NOI and cash flow evolve. Use the time series to identify:
-  - When NOI begins (year of lease-up or stabilization)
-  - Stabilized NOI level and timing
-  - Exit NOI and any growth assumptions
-For a ground-up dev: NOI starts at $0, ramps over lease-up period to stabilized.
-For value-add: walk from current NOI through post-renovation NOI.
-For core: focus on T12 vs UW Year 1 assumptions and growth trajectory.
+  1.  Property Name (Asset Name)
+  2.  Number of Properties
+  3.  Property Type
+  4.  Location
+  5.  Total SF
+  6.  Total Units
+  7.  Purchase Date
+  8.  Purchase Price
+  9.  Total Project Cost
+  10. Exit Date
+  11. Exit Value / Terminal Value
+  12. Hold Period
+  13. Original LTV
+  14. Interest Rate (see floating-rate rule below)
+  15. Unlevered IRR
+  16. Levered IRR
+  17. Exit Cap Rate
 
-## Return Profile
-Levered IRR, equity multiple, cash-on-cash. Mention LP-level returns if
-modeled separately from deal-level (most equity waterfalls show this).
-Note the assumptions driving returns (exit cap rate, rent growth, hold period).
+FLOATING-RATE INTEREST DISPLAY RULE:
+If Interest Rate Spread AND Interest Rate Cap are both populated, the debt is
+FLOATING. Display Interest Rate as:
+  `Interest Rate: <Spread>% spread + <Cap>% cap → <Spread+Cap>% max (Sheet!Cell)`
+Otherwise display Interest Rate as a single rate.
 
-## Key Risks
-3–5 risks SPECIFIC TO THIS DEAL. Each must reference a specific number from
-the data. Generic risks ("market risk", "interest rate risk") are forbidden
-unless tied to an actual model assumption.
-
-## Verified Data Appendix
-Bullet list of every bounded-checklist fact, grouped by status:
-  - Verified facts (single high-confidence source)
-  - Candidate pool facts (multi-candidate, top-ranked taken)
-  - Data quality issues (suspicious — flagged, not cited as fact)
-  - Missing fields (no candidate found in file)
-This is the audit trail — every cited number in the memo above can be traced
-here, AND the user sees explicitly what didn't survive validation.
-Format: `**Metric Name**: $X,XXX,XXX (Sheet!Cell)` or
-        `**Metric Name**: SUSPICIOUS — <reason>`
+DO NOT WRITE other sections in this output. Capital Structure, Cash Flow,
+Return Profile, CapEx Plan, and Key Risks are on-demand deep-dives the user
+will request via separate buttons. Do not generate them here.
 """
 
 

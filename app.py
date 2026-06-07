@@ -435,9 +435,58 @@ def render_scenario() -> None:
         if batch_id not in st.session_state.completed_batches:
             _run_scenario_for_batch(agent, scenario_key)
 
+    # Deep-dive buttons — only show for deal_review scenario after the memo is generated
+    if (
+        scenario_key == "deal_review"
+        and st.session_state.uploaded_filenames
+        and frozenset(st.session_state.uploaded_filenames) in st.session_state.completed_batches
+    ):
+        _render_deep_dive_buttons(agent)
+
     # User chat input — this is where the agent earns its keep (Q&A).
     user_input = st.chat_input("Ask a follow-up question...")
     _handle_chat_input(agent, user_input)
+
+
+def _render_deep_dive_buttons(agent: AgentSession) -> None:
+    """Render the 5 deep-dive buttons above the chat input."""
+    st.markdown(
+        '<div style="margin-top:8px; font-size:11px; color:#6b7280; '
+        'text-transform:uppercase; letter-spacing:0.06em;">Drill into a section</div>',
+        unsafe_allow_html=True,
+    )
+    cols = st.columns(5)
+    button_specs = [
+        ("capital_structure", "Capital Structure"),
+        ("cash_flow",         "Cash Flow / NOI"),
+        ("return_profile",    "Return Profile"),
+        ("capex_plan",        "CapEx Plan"),
+        ("key_risks",         "Key Risks"),
+    ]
+    for i, (key, label) in enumerate(button_specs):
+        with cols[i]:
+            if st.button(label, key=f"dd_{key}", use_container_width=True):
+                _run_deep_dive(agent, key, label)
+
+
+def _run_deep_dive(agent: AgentSession, key: str, label: str) -> None:
+    """Execute a deep-dive scenario and seed the result into the chat history."""
+    from scenarios.deep_dives import run_deep_dive
+
+    pseudo_user_msg = f"📊 {label} deep dive"
+    with st.chat_message("user"):
+        st.markdown(pseudo_user_msg)
+    with st.chat_message("assistant"):
+        with st.spinner(f"Generating {label}..."):
+            result = run_deep_dive(key)
+        if "error" in result:
+            st.error(result["error"])
+            return
+        st.markdown(result["narrative"])
+
+    # Seed into agent history so the assistant can reference it in follow-up Q&A
+    agent.history.append({"role": "user",      "content": pseudo_user_msg})
+    agent.history.append({"role": "assistant", "content": result["narrative"]})
 
 
 def _handle_chat_input(agent: AgentSession, user_input: str | None) -> None:

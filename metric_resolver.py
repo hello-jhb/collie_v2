@@ -27,7 +27,7 @@ from __future__ import annotations
 from typing import Any
 
 
-RESOLVER_VERSION = "phase2.v1"
+RESOLVER_VERSION = "phase2.v2"  # GPT picker prompt + candidate context upgraded
 
 
 # ---------------------------------------------------------------------------

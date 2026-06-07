@@ -31,7 +31,7 @@ if not log.handlers:
     log.setLevel(logging.INFO)
 
 
-RESOLVER_GPT_VERSION = "phase2.v1"
+RESOLVER_GPT_VERSION = "phase2.v2"  # improved prompt: period glossary + industry conventions
 
 
 # =============================================================================
@@ -151,34 +151,53 @@ def run_identity_checks(bounded_metrics: dict[str, Any]) -> dict[str, list[str]]
 # =============================================================================
 
 SYSTEM_PROMPT = """\
-You are choosing the deal-level value for a real estate underwriting metric
-from a list of candidate cells extracted from an Excel model.
+You are an experienced real estate underwriting analyst choosing the deal-level
+value for a specific metric from a list of candidate cells in an Excel model.
 
-Each candidate is shown with:
-  - the cell's value
-  - the sheet and cell reference
-  - the ROW LABEL (the text label that identifies what this cell is)
-  - SURROUNDING CONTEXT (cells above/below/left to give you semantic clues)
-  - the COLUMN HEADER if the cell is in a table
+PERIOD GLOSSARY (critical — period mismatch is the #1 source of wrong picks):
+  at_close   = value at the time of acquisition / first day of ownership
+               (e.g., "100% Purchase Price", "Going-In LTV", "Closing Equity")
+  year_1     = first projection year, also called "Going-In" or "T-12"
+               (e.g., "Going-In NOI", "Year 1 NOI", "NOI to Determine Going-In Cap Rate")
+               NOT the same as stabilized.
+  stabilized = post-business-plan / post-lease-up steady state
+               (e.g., "Stabilized NOI", "Stabilized Yield", "Stabilized Cap Rate")
+  exit       = at disposition / sale period
+               (e.g., "Exit NOI", "Sale Price", "Terminal Cap Rate", "Year of Sale")
+  n/a        = period doesn't apply (counts, ratios that span the deal, etc.)
 
-Your task: pick the candidate whose ROW LABEL and CONTEXT best matches the
-requested metric's DEFINITION at the requested PERIOD and SCALE.
+INDUSTRY CONVENTIONS (assume these unless overridden by metric definition):
+  - Numeric values labeled "100%", "Total", "Aggregate", "All-in", "Combined",
+    "Consolidated" = deal-level. Prefer over "per Unit", "per Key", "per SF",
+    "per Property", or sub-property breakdowns.
+  - Floating-rate debt has separate Spread, Index, and Cap. "Interest Rate"
+    means the all-in rate (Spread + Index) UNLESS a separate "Interest Rate
+    Spread" candidate also exists, in which case Interest Rate may refer to
+    the spread component only — check context.
+  - CapEx / Total Project Cost should pick the GRAND TOTAL row, not a
+    sub-category (hard costs only, soft costs only, contingency, etc.).
+  - "Going-In NOI" and "Net Operating Income" without a period modifier
+    typically mean Year 1 NOI. Distinguish from "Stabilized NOI" and "Exit NOI".
 
-REJECT candidates that:
-  - are per-unit / per-key / per-SF values (when the metric wants total)
-  - are historical year columns (when the metric wants going-in or stabilized)
-  - are sub-property breakdowns (when the metric wants deal-level total)
-  - are sensitivity/scenario alternatives (when the metric wants base case)
-  - have a row label that's semantically different from the metric requested
+ANTI-PATTERNS (reject these unless explicitly requested):
+  - Per-unit / per-key / per-SF / per-property cells when total wanted
+  - Historical year columns (2014, 2015, 2016, 2017, 2018-1, 2018-2) when
+    going-in or stabilized wanted
+  - Sub-property / single-asset cells when deal-level / consolidated wanted
+  - Sensitivity table cells (rows of alternative cap rates / IRRs)
+  - Scenario alternatives (downside, upside) when base case wanted
+  - Single-line items in a longer build-up (e.g., "Construction Contingency"
+    when "Total Hard Costs" or "Total Project Cost" wanted)
 
-If NONE of the candidates clearly matches, set "chosen_index" to null and
-explain why. Do not pick a candidate just because it has the highest
-confidence — only pick one that semantically matches.
+If NONE of the candidates is semantically a clear match for the requested
+metric, set "chosen_index" to null and explain why. Do not pick just because
+confidence is highest — only pick when the row label + context semantically
+match.
 
 Return ONLY JSON:
 {
   "chosen_index": <int 0-based> | null,
-  "reasoning": "short sentence citing the row label and any context clue",
+  "reasoning": "short sentence citing the row label / column header / context clue",
   "confidence": "high" | "medium" | "low"
 }
 No prose, no markdown fences.
@@ -236,21 +255,44 @@ def _gather_candidate_context(wb, candidate: dict) -> dict:
         "col_b_at_row":   _get_cell_text(ws, lrow, 2),
     }
 
-    # If the value cell is different from the label, get column header by walking up
+    # Get the column header for the value cell.
+    # This is the SINGLE most useful piece of context for Phase 2 — a column
+    # labeled "Going-In NOI" vs "Exit NOI" tells GPT which period the value is.
+    column_header_path: list[str] = []
     if value_cell and value_cell != label_cell:
         try:
             vcol_letters = "".join(ch for ch in value_cell if ch.isalpha())
             vrow_digits  = "".join(ch for ch in value_cell if ch.isdigit())
             vcol = _u.column_index_from_string(vcol_letters)
             vrow = int(vrow_digits)
-            # Walk up from the value cell looking for a text cell that's likely a header
-            for r in range(vrow - 1, max(0, vrow - 8), -1):
+            # Collect ALL text cells in this column above the value, up to 8 rows.
+            # Multi-row headers are common; capture the stack so GPT sees the full label.
+            for r in range(max(1, vrow - 8), vrow):
                 txt = _get_cell_text(ws, r, vcol)
-                if txt and not txt.replace(",", "").replace(".", "").replace("-", "").isdigit():
-                    ctx["column_header"] = txt
-                    break
+                if txt and not txt.replace(",", "").replace(".", "").replace("-", "").replace("%", "").isdigit():
+                    column_header_path.append(txt)
+            if column_header_path:
+                ctx["column_header"] = " / ".join(column_header_path[-3:])  # most recent 3
         except Exception:
             pass
+
+    # ALSO show the row's neighboring values so GPT can see if this is part of
+    # a wider table (per-key, per-unit, total columns side by side).
+    row_neighbors: list[str] = []
+    try:
+        for c_offset in range(-3, 4):
+            c = lcol + c_offset
+            if c < 1 or c == lcol:
+                continue
+            v = ws.cell(row=lrow, column=c).value
+            if v is None or str(v).strip() == "":
+                continue
+            cell_ref = _u.get_column_letter(c) + str(lrow)
+            row_neighbors.append(f"{cell_ref}={str(v)[:30]}")
+    except Exception:
+        pass
+    if row_neighbors:
+        ctx["row_neighbors"] = ", ".join(row_neighbors)
 
     return ctx
 
@@ -278,6 +320,8 @@ def _format_candidate_for_prompt(idx: int, candidate: dict, ctx: dict) -> str:
             lines.append(f"  cell below:   {ctx['label_below']!r}")
         if ctx.get("column_header"):
             lines.append(f"  column hdr:   {ctx['column_header']!r}")
+        if ctx.get("row_neighbors"):
+            lines.append(f"  row neighbors: {ctx['row_neighbors']}")
     return "\n".join(lines)
 
 
