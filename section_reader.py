@@ -89,7 +89,11 @@ def render_tab_as_table(file_path: Path, sheet_name: str) -> str:
     _period_re = _re.compile(
         r"^(20\d{2}|19\d{2}|year\s*\d+|yr\s*\d+|y\d+|q[1-4]|"
         r"stabili[sz]ed|exit|going.?in|at.?close|post.?close|trended|untrended|"
-        r"t-?12|trailing|forward|reversion|terminal)",
+        r"t-?12|trailing|forward|reversion|terminal|"
+        # column headers of sources/uses & basis build-up tables — so GPT can
+        # pick the TOTAL column (deal-level) over the At-Close column.
+        r"total|aggregate|all.?in|combined|consolidated|cumulative|"
+        r"\$/unit|\$/sf|\$/key|\$/gsf|per unit|per sf|per key|% total)",
         _re.IGNORECASE,
     )
 
@@ -183,7 +187,7 @@ def _fmt_cell(v) -> str:
 def _tabs_for_section(
     section_metrics: list[dict],
     nominated: dict[str, list[str]],
-    max_tabs: int = 4,
+    max_tabs: int = 3,
 ) -> list[str]:
     """
     Union the primary source roles of all metrics in the section, resolve each

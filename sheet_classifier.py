@@ -171,11 +171,27 @@ def nominate_authoritative_tabs(
         "sources_uses": ["Inputs"],   # if a sheet is classified sources_uses
       }
     """
+    # Tab names that are NEVER authoritative regardless of classified role —
+    # visualizations, comparison views, navigation. The classifier sometimes
+    # mis-roles these (a "Charts" tab labeled summary), and reading them
+    # pollutes the section extraction and wastes tokens/time.
+    _JUNK_NAME_PATTERNS = [
+        "chart", "graph", "dashboard", "comparison", "compare", "cover",
+        "instruction", "guide", "readme", "toc", "table of contents",
+        "index", "menu", "nav", "legend", "version", "changelog",
+    ]
+
+    def _is_junk(name: str) -> bool:
+        nl = name.lower()
+        return any(p in nl for p in _JUNK_NAME_PATTERNS)
+
     _CONF_RANK = {"high": 0, "medium": 1, "low": 2}
     by_role: dict[str, list[tuple[int, str]]] = {}
     for sheet, info in classification.items():
         role = info.get("role", "other")
         if role in ("comps", "sensitivity", "backup", "other"):
+            continue
+        if _is_junk(sheet):
             continue
         conf = info.get("confidence", "low")
         by_role.setdefault(role, []).append((_CONF_RANK.get(conf, 2), sheet))
@@ -183,7 +199,8 @@ def nominate_authoritative_tabs(
     nominated: dict[str, list[str]] = {}
     for role, entries in by_role.items():
         entries.sort(key=lambda x: x[0])  # high confidence first
-        nominated[role] = [name for _, name in entries]
+        # Cap at 2 tabs per role — the authoritative source plus one backup.
+        nominated[role] = [name for _, name in entries][:2]
     return nominated
 
 

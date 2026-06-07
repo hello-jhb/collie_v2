@@ -105,22 +105,48 @@ def _check_ltv_consistency(bm: dict) -> list[dict]:
 
 
 def _check_sources_uses(bm: dict) -> list[dict]:
+    """
+    Sources = Uses check, made phased-funding aware.
+
+    For value-add / development deals, the INITIAL debt + equity legitimately
+    funds less than Total Project Cost — future CapEx is funded by later draws.
+    So Total Project Cost >= initial (Debt + Equity) is NORMAL and must NOT be
+    flagged. We only flag two genuine errors:
+      (a) sources EXCEED uses materially (Debt + Equity > TPC by >5%) — impossible
+          in a balanced model, signals a wrong extraction.
+      (b) TPC is implausibly larger than initial cap (TPC > 3x (Debt+Equity)) —
+          likely TPC landed on the wrong cell (e.g. a cumulative cash-flow total).
+    """
     debt = _get_numeric(bm, "Debt Amount") or _get_numeric(bm, "Loan Amount")
     equity = _get_numeric(bm, "Equity Invested") or _get_numeric(bm, "Total Equity")
     cost = _get_numeric(bm, "Total Project Cost")
     if not all(v is not None and v > 0 for v in (debt, equity, cost)):
         return []
     sum_se = debt + equity
-    if abs(sum_se - cost) / cost > 0.05:
+
+    # (a) sources exceed uses — real error
+    if sum_se > cost * 1.05:
         return [{
             "metric_name": "Total Project Cost",
             "reason": (
-                f"Sources & Uses don't balance: "
-                f"Debt ({debt:,.0f}) + Equity ({equity:,.0f}) = {sum_se:,.0f} "
-                f"vs Total Cost {cost:,.0f}. >5% mismatch."
+                f"Sources exceed uses: Debt ({debt:,.0f}) + Equity ({equity:,.0f}) "
+                f"= {sum_se:,.0f} > Total Project Cost {cost:,.0f}. One of these is "
+                f"likely wrong (or Debt/Equity are totals while TPC is partial)."
             ),
             "severity": "suspicious",
         }]
+    # (b) TPC implausibly large vs initial capitalization
+    if cost > sum_se * 3.0:
+        return [{
+            "metric_name": "Total Project Cost",
+            "reason": (
+                f"Total Project Cost {cost:,.0f} is >3x initial capitalization "
+                f"(Debt+Equity = {sum_se:,.0f}). TPC may have landed on a wrong "
+                f"cell (e.g. a cumulative cash-flow total)."
+            ),
+            "severity": "suspicious",
+        }]
+    # TPC between (Debt+Equity) and 3x = normal phased funding → no flag.
     return []
 
 
