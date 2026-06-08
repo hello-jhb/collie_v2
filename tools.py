@@ -643,6 +643,30 @@ def _reconcile_bounded_metrics(bounded_metrics: dict, raw_insights: dict | None)
                 f"({pdv} → {edv} = {years:.1f} yrs)."
             )
 
+    # --- 3. Going-in Cap Rate is N/A for development / conversion deals ---
+    # If going-in NOI is ~0 (no operating income at acquisition), a going-in cap
+    # rate is meaningless. Mark it N/A so it's not shown as a real figure or
+    # flagged suspicious. Detect via NOI≈0 OR Pass 2 deal_type.
+    gnoi = bounded_metrics.get("Net Operating Income (NOI)")
+    gnoi_val = gnoi.get("normalized_value") if gnoi else None
+    deal_type = ""
+    dt = found.get("deal_type")
+    if isinstance(dt, dict):
+        deal_type = str(dt.get("value") or "").lower()
+    is_dev_conversion = (
+        (isinstance(gnoi_val, (int, float)) and abs(gnoi_val) < 1000)
+        or any(k in deal_type for k in ("develop", "conversion", "ground-up", "ground up"))
+    )
+    gic = bounded_metrics.get("Going-in Cap Rate")
+    if is_dev_conversion and gic:
+        gic["status"]        = "not_applicable"
+        gic["display_value"] = "N/A (no going-in NOI — dev/conversion)"
+        gic.setdefault("validation_notes", []).insert(
+            0,
+            "Going-in cap rate is N/A: development/conversion deal has no "
+            "operating income at acquisition (NOI ≈ 0).",
+        )
+
 
 def _years_between(d1, d2):
     """Return fractional years between two date-like values, or None."""

@@ -64,6 +64,11 @@ def _check_going_in_cap_rate(bm: dict) -> list[dict]:
     noi = _get_numeric(bm, "Net Operating Income (NOI)")
     price = _get_numeric(bm, "Purchase Price")
     cap = _get_numeric(bm, "Going-in Cap Rate")
+    # Dev / conversion deals have NO operating income at acquisition (NOI ≈ 0),
+    # so a going-in cap rate is meaningless and the identity (cap = NOI/price)
+    # does not apply. Skip — do NOT flag, and don't let it drive "does not cohere."
+    if noi is not None and abs(noi) < 1000:
+        return []
     if not all(v is not None and v > 0 for v in (noi, price, cap)):
         return []
     implied_cap = noi / price

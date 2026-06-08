@@ -224,7 +224,7 @@ def _format_bounded_metrics(bounded: dict) -> str:
         return "(No bounded-metric extraction available — Phase 1 pipeline did not run.)"
 
     # Group by status
-    verified, inferred, conflict, pool, suspicious, missing = [], [], [], [], [], []
+    verified, inferred, conflict, pool, suspicious, missing, na = [], [], [], [], [], [], []
     for name, rec in bounded.items():
         status = rec.get("status")
         if status == "verified":
@@ -237,6 +237,8 @@ def _format_bounded_metrics(bounded: dict) -> str:
             pool.append((name, rec))
         elif status == "suspicious":
             suspicious.append((name, rec))
+        elif status == "not_applicable":
+            na.append((name, rec))
         elif status == "missing":
             missing.append((name, rec))
 
@@ -282,6 +284,13 @@ def _format_bounded_metrics(bounded: dict) -> str:
         for name, rec in suspicious:
             notes = "; ".join(rec.get("validation_notes", []))[:160]
             lines.append(f"  - **{name}**: {rec['display_value']}  — {notes}")
+        lines.append("")
+    if na:
+        lines.append("NOT APPLICABLE (legitimately N/A for this deal type — show as 'N/A', "
+                     "do NOT treat as a data gap):")
+        for name, rec in na:
+            notes = "; ".join(rec.get("validation_notes", []))[:140]
+            lines.append(f"  - **{name}**: N/A — {notes}")
         lines.append("")
     if missing:
         lines.append("MISSING (no candidates found in scanned sheets — represent as '—'):")
