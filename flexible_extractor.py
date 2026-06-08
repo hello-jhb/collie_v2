@@ -404,23 +404,20 @@ def find_nearby_value(ws, row, col, metric_name: str = "", metric_unit: str | No
         c = data_cols[0]
         return ws.cell(row=row, column=c).value, cell_address(row, c), "right"
 
-    # Look below
-    for offset in range(1, 6):
+    # Look directly below — but STOP at the first text cell (a new row label).
+    # We must not skip past an empty cell into a different metric's row.
+    for offset in range(1, 4):
         value = ws.cell(row=row + offset, column=col).value
         if is_numeric(value):
             return value, cell_address(row + offset, col), "below"
+        if isinstance(value, str) and value.strip():
+            break  # hit another label — this metric's value is genuinely absent
 
-    # Last resort: nearby grid scan
-    for r_offset in range(-2, 4):
-        for c_offset in range(-2, 6):
-            r = row + r_offset
-            c = col + c_offset
-            if r < 1 or c < 1:
-                continue
-            value = ws.cell(row=r, column=c).value
-            if is_numeric(value):
-                return value, cell_address(r, c), "nearby"
-
+    # No DIAGONAL grid scan. The old 5x5 nearby scan grabbed up/left/diagonal
+    # cells — that's how "Occupancy (empty)" picked up the diagonal
+    # "Discount to Replacement Cost" cell. If the value isn't immediately to the
+    # right or directly below the label, treat it as NOT FOUND rather than
+    # guessing a distant cell that belongs to a different metric.
     return None, None, None
 
 

@@ -188,9 +188,22 @@ def nominate_authoritative_tabs(
     nominated: dict[str, list[str]] = {}
     for role, entries in by_role.items():
         entries.sort(key=lambda x: x[0])  # high confidence first
-        # Cap at 2 tabs per role — best authoritative source plus one backup.
-        # Cap is content-neutral; it keeps the highest-confidence tabs.
-        nominated[role] = [name for _, name in entries][:2]
+        # Cap at 3 tabs per role. (2 was too tight — on BAC it dropped the One
+        # Pager, where Levered IRR + Equity Multiple actually live, causing
+        # returns 0/3.) 3 keeps the authoritative source plus two backups.
+        nominated[role] = [name for _, name in entries][:3]
+
+    # Fallback authoritative pool — used when a metric's preferred roles map to
+    # NO nominated tab (the classifier didn't confidently assign that role).
+    # Without this, on complex models property metrics SKIP with "no target
+    # sheets matched preferred list" and go silently missing. We surface the
+    # highest-confidence summary/inputs/sources_uses tabs as a catch-all.
+    catch_all: list[str] = []
+    for role in ("summary", "inputs", "sources_uses"):
+        catch_all.extend(nominated.get(role, []))
+    # de-dupe preserving order
+    seen = set()
+    nominated["_catch_all"] = [t for t in catch_all if not (t in seen or seen.add(t))][:4]
     return nominated
 
 

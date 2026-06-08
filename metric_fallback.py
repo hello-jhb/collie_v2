@@ -45,6 +45,13 @@ You will be shown ONE sheet from an Excel workbook and asked to find ONE specifi
 
 CRITICAL RULES:
 - Return only what is literally in the sheet. If the value is not present, say not found.
+- DO NOT SUBSTITUTE. If the row whose label matches the requested metric has an
+  EMPTY value cell, the metric is NOT FOUND — never borrow a value from an
+  adjacent or nearby row that is a DIFFERENT metric. Example: if "Occupancy %"
+  is blank but the next row "Discount to Replacement Cost %" has 17.5%, the
+  occupancy is NOT FOUND — do not return 17.5%.
+- The matched row label must be SEMANTICALLY the requested metric, not merely
+  near it or numerically plausible.
 - The value must come from a single cell. Cite the cell (e.g. "C11").
 - If the metric is ambiguous (multiple plausible cells), pick the one whose ROW LABEL
   is most semantically specific to the requested metric. Cite your reasoning.
@@ -118,6 +125,14 @@ def _resolve_target_sheets(metric: dict, available_sheets: list[str]) -> list[st
                 break  # first match per keyword
         if len(matches) >= 2:
             break
+
+    # Catch-all: if the metric's preferred sheet keywords matched NOTHING in
+    # this file (the common "no target sheets matched preferred list" SKIP on
+    # complex models), fall back to the top-priority sheets so the metric still
+    # gets a read attempt rather than going silently missing.
+    if not matches:
+        matches = ranked[:2]
+
     return matches[:2]
 
 

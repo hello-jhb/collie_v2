@@ -190,12 +190,16 @@ def _fmt_cell(v) -> str:
 def _tabs_for_section(
     section_metrics: list[dict],
     nominated: dict[str, list[str]],
-    max_tabs: int = 3,
+    max_tabs: int = 4,
 ) -> list[str]:
     """
     Union the primary source roles of all metrics in the section, resolve each
     role to its nominated authoritative tab(s), and return an ordered, de-duped
     list of actual sheet names to read for this section.
+
+    If the section's preferred roles resolve to NO tabs (classifier gap on a
+    complex model), fall back to the catch-all authoritative pool so the
+    section still gets read rather than going silently missing.
     """
     ordered_roles: list[str] = []
     for m in section_metrics:
@@ -208,6 +212,13 @@ def _tabs_for_section(
         for tab in nominated.get(role, []):
             if tab not in tabs:
                 tabs.append(tab)
+
+    # Catch-all fallback: ensure summary-class tabs are always available so a
+    # classifier gap doesn't leave the whole section blind.
+    for tab in nominated.get("_catch_all", []):
+        if tab not in tabs:
+            tabs.append(tab)
+
     return tabs[:max_tabs]
 
 
