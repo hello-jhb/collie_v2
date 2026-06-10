@@ -1,0 +1,69 @@
+"""
+aam.py — Audit Appendix Metrics (AAM).
+
+The AAM is the small, curated set of facts the engine must get right in the
+FIRST pass, before any business-plan narrative or deep-dive analysis. It is the
+human-verification target: the analyst reviews and signs off on these metrics
+(the "audit appendix") before the engine traces formulas outward (Stage 2) to
+gather everything else.
+
+Design intent (2026-06-10 redesign):
+  - Stage 1 extraction is scoped to the AAM ONLY, so a single focused pass can
+    nail them instead of a broad 5-section sweep over all 109 catalog metrics.
+  - Every AAM id is an existing `in_bounded_list` catalog metric — AAM is a
+    SCOPE over the catalog, NOT a new metric definition.
+
+Interest Rate is represented as floating-rate components (base/index rate +
+spread + cap) per the design decision, rather than a single all-in rate.
+"""
+from __future__ import annotations
+
+# Ordered AAM concept groups. Order drives the audit-appendix display order.
+AAM_GROUPS: dict[str, list[str]] = {
+    "Identity": ["asset_name", "property_type", "location", "total_units", "total_sf"],
+    "Basis":    ["purchase_price", "total_project_cost", "going_in_cap_rate"],
+    "Income":   ["net_operating_income_noi"],
+    "Debt":     ["debt_amount", "original_ltv", "interest_rate",
+                 "interest_rate_spread", "interest_rate_cap"],
+    "Timing":   ["purchase_date", "hold_period", "exit_date"],
+    "Return":   ["exit_cap_rate", "levered_irr", "equity_multiple"],
+}
+
+# Flat ordered list of AAM metric_ids (canonical extraction / display order).
+AAM_METRIC_IDS: list[str] = [mid for ids in AAM_GROUPS.values() for mid in ids]
+
+_AAM_SET = set(AAM_METRIC_IDS)
+
+
+def is_aam(metric_id: str) -> bool:
+    """True if metric_id belongs to the Audit Appendix Metric set."""
+    return metric_id in _AAM_SET
+
+
+def group_of(metric_id: str) -> str | None:
+    """Return the AAM display group for a metric_id, or None if not AAM."""
+    for group, ids in AAM_GROUPS.items():
+        if metric_id in ids:
+            return group
+    return None
+
+
+def aam_metrics(catalog: list[dict]) -> list[dict]:
+    """
+    Filter a loaded metric catalog to the AAM entries, in canonical AAM order.
+
+    Returns catalog entry dicts (same shape the resolver/extractor consume).
+    """
+    by_id = {m["metric_id"]: m for m in catalog}
+    return [by_id[mid] for mid in AAM_METRIC_IDS if mid in by_id]
+
+
+def validate_aam(catalog: list[dict]) -> list[str]:
+    """
+    Return AAM metric_ids missing from the catalog (empty list = all present).
+
+    Used by tests / startup checks so the AAM set never silently drifts away
+    from the catalog definitions it depends on.
+    """
+    have = {m["metric_id"] for m in catalog}
+    return [mid for mid in AAM_METRIC_IDS if mid not in have]

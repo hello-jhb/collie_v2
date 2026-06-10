@@ -221,6 +221,48 @@ def write_layer(
     return ssot
 
 
+def apply_verified_aam(
+    layer: str,
+    verified: dict[str, dict[str, Any]],
+    ssot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """
+    Patch a layer's bounded_metric records with human-verified Audit Appendix
+    values. Called AFTER the full ingest pipeline runs, so the human's confirmed
+    values win over whatever the extractor produced for AAM fields.
+
+    `verified` is shaped { metric_name: {value, display, source_sheet,
+    source_cell, note} }. Each patched record is marked status="verified" and
+    human_verified=True.
+    """
+    if ssot is None:
+        ssot = load_ssot()
+    lyr = ssot["layers"].get(layer)
+    if not lyr:
+        return ssot
+
+    bm = lyr.setdefault("bounded_metrics", {})
+    for name, v in verified.items():
+        rec = bm.get(name) or {"metric_name": name}
+        rec["raw_value"]        = v.get("value")
+        rec["normalized_value"] = v.get("value")
+        rec["display_value"]    = v.get("display", str(v.get("value")))
+        rec["status"]           = "verified"
+        rec["human_verified"]   = True
+        if v.get("source_sheet") is not None:
+            rec["source_sheet"] = v["source_sheet"]
+        if v.get("source_cell") is not None:
+            rec["source_cell"] = v["source_cell"]
+        rec.setdefault("validation_notes", []).insert(
+            0, v.get("note", "Human-verified via audit appendix.")
+        )
+        bm[name] = rec
+
+    lyr["bounded_metrics"] = bm
+    save_ssot(ssot)
+    return ssot
+
+
 def update_identity(
     fields: dict[str, Any],
     ssot: dict[str, Any] | None = None,

@@ -133,6 +133,16 @@ _SESSION_DEFAULTS: dict = {
     "pending_overrides":  {},
     # Set of batches (frozensets of filenames) we've already run the scenario for.
     "completed_batches":  set(),
+    # --- Stage-1 Audit Appendix verification gate (deal_review only) ---
+    # AAM extraction result for the current batch: {metric_name: record}
+    "aam_records":          {},
+    # Which batch (frozenset of filenames) aam_records belongs to.
+    "aam_batch_id":         None,
+    # Batches the user has reviewed + confirmed in the audit appendix.
+    "aam_confirmed_batches": set(),
+    # Bumped each time GPT blank-fill runs, so the data_editor rebuilds cleanly
+    # from the updated records instead of replaying a stale edit delta.
+    "aam_fill_version":      0,
 }
 
 
@@ -189,6 +199,10 @@ def _wipe_uploads_and_reset_ssot() -> None:
     st.session_state.uploaded_filenames = set()
     st.session_state.pending_overrides = {}
     st.session_state.completed_batches = set()
+    st.session_state.aam_records = {}
+    st.session_state.aam_batch_id = None
+    st.session_state.aam_confirmed_batches = set()
+    st.session_state.aam_fill_version = 0
 
 
 def _activate_scenario(scenario_key: str) -> None:
@@ -543,21 +557,33 @@ def render_scenario() -> None:
             st.markdown(m["content"])
 
     # ---------------------------------------------------------------------
-    # Deterministic orchestration — 3 phases, each idempotent across reruns.
+    # Deterministic orchestration.
     # ---------------------------------------------------------------------
 
-    # Phase 1: ingest any new files (queues manual-override candidates).
-    if new_files:
-        _ingest_new_files(new_files)
+    # Stage-1 verification gate (deal_review only): before any ingest/analysis,
+    # extract the Audit Appendix Metrics, let the human verify them, and BLOCK
+    # until they confirm. The full pipeline + analysis run only after confirm.
+    if scenario_key == "deal_review" and st.session_state.uploaded_filenames:
+        if frozenset(st.session_state.uploaded_filenames) not in st.session_state.aam_confirmed_batches:
+            _render_aam_gate(agent)
+            # Allow follow-up Q&A while the appendix is being reviewed.
+            user_input = st.chat_input("Ask a follow-up question...")
+            _handle_chat_input(agent, user_input)
+            return
+    else:
+        # Legacy path (perf_vs_plan etc.): ingest on upload.
+        # Phase 1: ingest any new files (queues manual-override candidates).
+        if new_files:
+            _ingest_new_files(new_files)
 
-    # Phase 2: if files need manual classification, show the override form
-    # and stop — we can't run the scenario until layers are resolved.
-    if st.session_state.get("pending_overrides"):
-        _render_manual_override_ui()
-        # Still allow follow-up Q&A while waiting on overrides
-        user_input = st.chat_input("Ask a follow-up question...")
-        _handle_chat_input(agent, user_input)
-        return
+        # Phase 2: if files need manual classification, show the override form
+        # and stop — we can't run the scenario until layers are resolved.
+        if st.session_state.get("pending_overrides"):
+            _render_manual_override_ui()
+            # Still allow follow-up Q&A while waiting on overrides
+            user_input = st.chat_input("Ask a follow-up question...")
+            _handle_chat_input(agent, user_input)
+            return
 
     # Phase 3: run the scenario if we haven't already for this batch.
     if st.session_state.uploaded_filenames:
@@ -704,6 +730,203 @@ def _ingest_new_files(new_files: list) -> None:
 
     if failed_to_classify:
         st.session_state.pending_overrides = failed_to_classify
+
+
+# =============================================================================
+# Stage-1 Audit Appendix verification gate (deal_review)
+# =============================================================================
+
+# Units whose values are numeric (editable as raw numbers; the Display column
+# carries the human-readable form). Everything else (date/text) edits as a string.
+_NUMERIC_UNITS = {"USD", "ratio", "percent", "months", "years", "count", "sf"}
+
+
+def _find_rec_by_id(records: dict, metric_id: str) -> dict | None:
+    for rec in records.values():
+        if rec.get("metric_id") == metric_id:
+            return rec
+    return None
+
+
+def _aam_source(rec: dict) -> str:
+    sheet, cell = rec.get("source_sheet"), rec.get("source_cell")
+    if sheet and cell:
+        return f"{sheet}!{cell}"
+    return "—"
+
+
+def _aam_editable_value(rec: dict) -> str:
+    """Seed value for the editable column: raw number string, or '' if missing."""
+    if rec.get("status") == "missing":
+        return ""
+    nv = rec.get("normalized_value")
+    return "" if nv is None else str(nv)
+
+
+def _coerce_value(rec: dict, s: str):
+    """
+    Turn an edited string into a stored value.
+
+    Returns (value, ok). For numeric metrics that fail to parse we keep the
+    original normalized value (ok=False) so a typo can never feed a string into
+    downstream arithmetic.
+    """
+    if (rec or {}).get("unit") in _NUMERIC_UNITS:
+        cleaned = s.replace("$", "").replace(",", "").replace("%", "").replace("x", "").strip()
+        try:
+            return float(cleaned), True
+        except ValueError:
+            return (rec or {}).get("normalized_value"), False
+    return s, True
+
+
+def _collect_verified(records: dict, edited) -> dict:
+    """Build the verified-overrides dict from the edited appendix table."""
+    verified: dict[str, dict] = {}
+    for _, row in edited.iterrows():
+        name = row["Metric"]
+        rec = records.get(name) or {}
+        val_str = str(row["Value"] or "").strip()
+        if val_str == "":
+            continue  # left blank → stays missing, not asserted
+        value, ok = _coerce_value(rec, val_str)
+        unchanged = str(value) == str(rec.get("normalized_value"))
+        if unchanged:
+            note, display = "Human-verified via audit appendix.", row["Display"]
+        elif not ok:
+            note = (f"Human entered '{val_str}' but it could not be parsed as a "
+                    f"number; kept original {rec.get('normalized_value')}.")
+            display = row["Display"]
+        else:
+            note = f"Human-corrected via audit appendix (was {rec.get('normalized_value')})."
+            display = val_str
+        verified[name] = {
+            "value":        value,
+            "display":      display,
+            "source_sheet": rec.get("source_sheet"),
+            "source_cell":  rec.get("source_cell"),
+            "note":         note,
+        }
+    return verified
+
+
+def _render_aam_gate(agent: AgentSession) -> None:
+    """
+    Render the Audit Appendix + verification gate. Blocks analysis until the
+    user confirms. On confirm, runs the full ingest and applies verified values.
+    """
+    import aam
+    import pandas as pd
+
+    batch_id = frozenset(st.session_state.uploaded_filenames)
+
+    # Extract AAM once per batch — DETERMINISTIC ONLY (fast, free). GPT fires
+    # only when the user clicks "Fill blanks with GPT" (bulk-fill, then review).
+    if st.session_state.aam_batch_id != batch_id or not st.session_state.aam_records:
+        primary = sorted(st.session_state.uploaded_filenames)[0]
+        with st.status(f"Reading audit-appendix metrics from {primary}…", expanded=False):
+            from aam_extractor import extract_aam
+            st.session_state.aam_records = extract_aam(UPLOAD_DIR / primary, use_gpt_gap_fill=False)
+        st.session_state.aam_batch_id = batch_id
+        st.session_state.aam_fill_version = 0
+
+    records = st.session_state.aam_records
+
+    st.markdown("### 📋 Audit Appendix — verify before analysis")
+    st.caption(
+        "These are the core facts Collie extracted. Review each value and its "
+        "source, correct anything wrong in the **Value** column, then confirm to "
+        "run the analysis. Blank rows can be left as-is, or filled with GPT below."
+    )
+
+    rows = []
+    for mid in aam.AAM_METRIC_IDS:
+        rec = _find_rec_by_id(records, mid)
+        if rec is None:
+            continue
+        source = _aam_source(rec)
+        if rec.get("_via_aam_gpt") and source != "—":
+            source = f"🤖 {source}"  # value came from the focused GPT read
+        rows.append({
+            "Group":   aam.group_of(mid) or "",
+            "Metric":  rec.get("metric_name", mid),
+            "Value":   _aam_editable_value(rec),
+            "Display": rec.get("display_value") or "—",
+            "Source":  source,
+            "Status":  rec.get("status", "missing"),
+        })
+
+    edited = st.data_editor(
+        pd.DataFrame(rows),
+        key=f"aam_editor_{abs(hash(batch_id))}_{st.session_state.aam_fill_version}",
+        width="stretch",
+        hide_index=True,
+        disabled=["Group", "Metric", "Display", "Source", "Status"],
+        column_config={
+            "Value": st.column_config.TextColumn(
+                "Value (editable)", help="Correct the value if it's wrong. Numbers are raw (unformatted)."
+            ),
+        },
+    )
+
+    counts: dict[str, int] = {}
+    for r in rows:
+        counts[r["Status"]] = counts.get(r["Status"], 0) + 1
+    st.caption("Status — " + " · ".join(f"{k}: {v}" for k, v in sorted(counts.items())))
+
+    # --- Bulk GPT blank-fill (step 4): one focused call over the gaps ---------
+    n_blanks = sum(counts.get(s, 0) for s in ("missing", "candidate_pool", "suspicious"))
+    fill_col, confirm_col = st.columns([1, 1])
+    with fill_col:
+        from scenarios._llm import llm_available
+        if not llm_available():
+            st.button("🤖 Fill blanks with GPT", disabled=True, width="stretch",
+                      help="Set OPENAI_API_KEY to enable GPT blank-fill.")
+        elif n_blanks == 0:
+            st.button("🤖 Fill blanks with GPT", disabled=True, width="stretch",
+                      help="No blanks to fill — every AAM field resolved.")
+        elif st.button(f"🤖 Fill {n_blanks} blank(s) with GPT", width="stretch"):
+            _fill_aam_blanks(records)
+    with confirm_col:
+        if st.button("✅ Confirm & generate analysis", type="primary", width="stretch"):
+            _confirm_aam_and_ingest(agent, _collect_verified(records, edited))
+
+
+def _fill_aam_blanks(records: dict) -> None:
+    """Run the focused GPT gap-fill over current AAM blanks, then refresh the table."""
+    primary = sorted(st.session_state.uploaded_filenames)[0]
+    with st.status("Filling blanks with a focused GPT read…", expanded=False):
+        from aam_extractor import fill_aam_blanks
+        filled = fill_aam_blanks(UPLOAD_DIR / primary, records)
+    st.session_state.aam_records = records
+    st.session_state.aam_fill_version += 1  # force the editor to rebuild
+    st.toast(f"GPT filled {filled} field(s) — review before confirming.")
+    st.rerun()
+
+
+def _confirm_aam_and_ingest(agent: AgentSession, verified: dict) -> None:
+    """Confirm handler: run the full ingest, apply verified values, unlock analysis."""
+    batch_id = frozenset(st.session_state.uploaded_filenames)
+    files = sorted(st.session_state.uploaded_filenames)
+
+    with st.chat_message("user"):
+        st.markdown("Uploaded: " + ", ".join(files))
+    with st.chat_message("assistant"):
+        with st.status("Confirmed — ingesting and applying verified values…", expanded=True) as status:
+            for fn in files:
+                status.update(label=f"Ingesting {fn}…")
+                result = tools.ingest_to_ssot_with_layer(fn, "underwriting")
+                if "error" in result:
+                    st.markdown(f"❌ **{fn}** — {result['error']}")
+                else:
+                    st.markdown(f"✅ **{fn}** → `underwriting` ({result['metric_count']} metrics)")
+            if verified:
+                ssot.apply_verified_aam("underwriting", verified)
+                st.markdown(f"📌 Applied **{len(verified)}** human-verified value(s).")
+            status.update(label="Verified & ingested", state="complete")
+
+    st.session_state.aam_confirmed_batches.add(batch_id)
+    st.rerun()
 
 
 def _run_scenario_for_batch(agent: AgentSession, scenario_key: str) -> None:
