@@ -316,6 +316,11 @@ def _ssot_panel() -> None:
                     st.markdown("**Identity Checks** — final reconciled values only")
                     st.dataframe(identity_checks, use_container_width=True)
 
+                knowledge_usage = bundle.get("knowledge_usage") or {}
+                if knowledge_usage:
+                    st.markdown("**Knowledge Usage** — active JSON patterns")
+                    st.json(knowledge_usage)
+
                 extraction_plan = bundle.get("extraction_plan") or []
                 if extraction_plan:
                     with st.expander("Extraction Plan", expanded=False):

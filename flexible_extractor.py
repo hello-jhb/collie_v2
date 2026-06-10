@@ -1099,6 +1099,10 @@ def extract_time_series_rows(file_path, max_rows_per_sheet: int = 25, max_total_
                         "aggregation_method": aggregation_method,
                         "annual_headers": annual_headers,
                         "annual_values": annual_values,
+                        "fired_patterns": (
+                            ["monthly_noi_requires_period_conversion"]
+                            if annual_headers and "noi" in label.lower() else []
+                        ),
                     })
                     series_per_sheet[sheet_name] = series_per_sheet.get(sheet_name, 0) + 1
 

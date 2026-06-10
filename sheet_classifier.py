@@ -22,6 +22,7 @@ from pathlib import Path
 
 from scenarios._llm import client, MODEL_FAST, llm_available
 from re_knowledge import SHEET_ROLE_VOCAB, ROLE_TO_TIER
+from knowledge_store import build_runtime_knowledge_block
 
 log = logging.getLogger("fb.sheet_classifier")
 if not log.handlers:
@@ -43,6 +44,8 @@ unreliable). A sheet named "Tab3" may be a cash flow proforma; a sheet named
 "Summary" may be empty.
 
 {SHEET_ROLE_VOCAB}
+
+{build_runtime_knowledge_block(["workbook_mapping"])}
 
 For each sheet, output its role and a confidence (high/medium/low).
 Confidence is "low" if the labels are too sparse to tell.

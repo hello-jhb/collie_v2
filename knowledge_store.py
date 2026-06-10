@@ -1,0 +1,264 @@
+"""
+knowledge_store.py - safe runtime bridge for Collie's JSON knowledge layer.
+
+There are three separate concepts:
+
+1. observations/ are deal-specific reviewed evidence. They are never loaded by
+   runtime extraction or prompt construction.
+2. patterns/ are distilled reusable knowledge. Only entries with
+   status == "active" can influence runtime.
+3. runtime knowledge block is a small prompt fragment built from active
+   patterns only.
+
+GPT may suggest observations, but GPT does not decide truth. Promotion remains:
+Observation -> Hypothesis -> Rule, with human approval represented by an active
+status in the pattern catalog.
+"""
+from __future__ import annotations
+
+import json
+import logging
+from functools import lru_cache
+from pathlib import Path
+from typing import Any
+
+
+log = logging.getLogger("fb.knowledge_store")
+
+KNOWLEDGE_DIR = Path("knowledge")
+PATTERNS_DIR = KNOWLEDGE_DIR / "patterns"
+OBSERVATIONS_DIR = KNOWLEDGE_DIR / "observations"
+
+INACTIVE_STATUSES = {"candidate", "draft", "rejected", "superseded", "archived", "inactive"}
+VALID_SCOPES = {"workbook_mapping", "metric_resolution", "validation", "business_plan", "chat"}
+
+PATTERN_FILES = {
+    "model_patterns": "model_patterns.json",
+    "metric_patterns": "metric_patterns.json",
+    "business_plan_patterns": "business_plan_patterns.json",
+}
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _rule_from_metric(metric: dict[str, Any], rule: dict[str, Any]) -> dict[str, Any]:
+    pattern = rule.get("pattern") or {}
+    interpretation = pattern.get("interpretation") or {}
+    return {
+        "rule_id": rule.get("rule_id"),
+        "pattern_id": rule.get("rule_id"),
+        "status": rule.get("status"),
+        "scope": rule.get("scope") or "metric_resolution",
+        "description": rule.get("description") or "; ".join(metric.get("observations", [])[:2]),
+        "condition": rule.get("condition") or pattern.get("condition"),
+        "action": rule.get("action") or interpretation or pattern,
+        "confidence": rule.get("confidence"),
+        "evidence_count": rule.get("evidence_count"),
+        "source_file": "metric_patterns.json",
+        "metric": metric.get("metric"),
+        "canonical_unit": metric.get("canonical_unit"),
+    }
+
+
+def _rule_from_model(pattern: dict[str, Any]) -> dict[str, Any]:
+    evidence = pattern.get("evidence") or {}
+    return {
+        "rule_id": pattern.get("rule_id") or pattern.get("pattern_id"),
+        "pattern_id": pattern.get("pattern_id"),
+        "status": pattern.get("status"),
+        "scope": pattern.get("scope") or "workbook_mapping",
+        "description": pattern.get("description") or f"Workbook pattern for {pattern.get('model_type')}",
+        "condition": pattern.get("condition") or pattern.get("signals"),
+        "action": pattern.get("action") or pattern.get("common_structure"),
+        "confidence": pattern.get("confidence", 0.0),
+        "evidence_count": pattern.get("evidence_count", evidence.get("evidence_count", 0)),
+        "source_file": "model_patterns.json",
+    }
+
+
+def _rule_from_business(pattern: dict[str, Any]) -> dict[str, Any]:
+    evidence = pattern.get("evidence") or {}
+    return {
+        "rule_id": pattern.get("rule_id") or pattern.get("pattern_id"),
+        "pattern_id": pattern.get("pattern_id"),
+        "status": pattern.get("status"),
+        "scope": pattern.get("scope") or "business_plan",
+        "description": pattern.get("description") or f"Business-plan pattern for {pattern.get('property_type')}",
+        "condition": pattern.get("condition") or pattern.get("signals"),
+        "action": pattern.get("action") or pattern.get("analysis_guidance"),
+        "confidence": pattern.get("confidence", 0.0),
+        "evidence_count": pattern.get("evidence_count", evidence.get("evidence_count", 0)),
+        "source_file": "business_plan_patterns.json",
+    }
+
+
+def _iter_pattern_rules(base_dir: Path) -> list[dict[str, Any]]:
+    patterns_dir = base_dir / "patterns"
+    rules: list[dict[str, Any]] = []
+
+    metric_payload = _read_json(patterns_dir / PATTERN_FILES["metric_patterns"])
+    for metric in metric_payload.get("metrics", []):
+        for rule in metric.get("rules", []):
+            rules.append(_rule_from_metric(metric, rule))
+
+    model_payload = _read_json(patterns_dir / PATTERN_FILES["model_patterns"])
+    for pattern in model_payload.get("patterns", []):
+        rules.append(_rule_from_model(pattern))
+
+    business_payload = _read_json(patterns_dir / PATTERN_FILES["business_plan_patterns"])
+    for pattern in business_payload.get("patterns", []):
+        rules.append(_rule_from_business(pattern))
+
+    return rules
+
+
+def validate_pattern(pattern: dict[str, Any]) -> list[str]:
+    """
+    Validate the minimal runtime schema. Invalid patterns are skipped and logged.
+
+    Required fields:
+    - rule_id or pattern_id
+    - status
+    - scope
+    - description
+    - confidence
+    - evidence_count
+    """
+    errors: list[str] = []
+    if not (pattern.get("rule_id") or pattern.get("pattern_id")):
+        errors.append("missing rule_id or pattern_id")
+    if not pattern.get("status"):
+        errors.append("missing status")
+    if pattern.get("scope") not in VALID_SCOPES:
+        errors.append(f"invalid scope {pattern.get('scope')!r}")
+    if not pattern.get("description"):
+        errors.append("missing description")
+    if pattern.get("confidence") is None:
+        errors.append("missing confidence")
+    if pattern.get("evidence_count") is None:
+        errors.append("missing evidence_count")
+    return errors
+
+
+@lru_cache(maxsize=1)
+def _load_pattern_catalog(base_dir_str: str = str(KNOWLEDGE_DIR)) -> dict[str, Any]:
+    base_dir = Path(base_dir_str)
+    rules = _iter_pattern_rules(base_dir)
+    active: list[dict[str, Any]] = []
+    ignored = 0
+    invalid: list[dict[str, Any]] = []
+
+    for rule in rules:
+        errors = validate_pattern(rule)
+        if errors:
+            invalid.append({
+                "rule_id": rule.get("rule_id") or rule.get("pattern_id"),
+                "status": rule.get("status"),
+                "source_file": rule.get("source_file"),
+                "errors": errors,
+            })
+            log.warning("Invalid knowledge pattern skipped: %s", invalid[-1])
+            continue
+
+        status = str(rule.get("status")).lower()
+        if status == "active":
+            active.append({
+                **rule,
+                "confidence": _as_float(rule.get("confidence")),
+                "evidence_count": _as_int(rule.get("evidence_count")),
+            })
+        else:
+            if status in INACTIVE_STATUSES or status != "active":
+                ignored += 1
+
+    return {
+        "active_patterns": active,
+        "candidate_patterns_ignored": ignored,
+        "invalid_patterns": invalid,
+        "total_patterns": len(rules),
+    }
+
+
+def load_active_patterns(base_dir: Path | str = KNOWLEDGE_DIR) -> list[dict[str, Any]]:
+    """
+    Return only active runtime patterns. This never reads observations/.
+    """
+    return list(_load_pattern_catalog(str(Path(base_dir)))["active_patterns"])
+
+
+def knowledge_diagnostics(base_dir: Path | str = KNOWLEDGE_DIR) -> dict[str, Any]:
+    """Return counts and validation warnings for Analyst Bundle visibility."""
+    catalog = _load_pattern_catalog(str(Path(base_dir)))
+    return {
+        "active_patterns_loaded": len(catalog["active_patterns"]),
+        "candidate_patterns_ignored": catalog["candidate_patterns_ignored"],
+        "invalid_patterns": catalog["invalid_patterns"],
+    }
+
+
+def build_runtime_knowledge_block(
+    scopes: list[str] | None = None,
+    base_dir: Path | str = KNOWLEDGE_DIR,
+) -> str:
+    """
+    Convert active JSON rules into a concise prompt block.
+
+    Inactive patterns and observations are excluded. Empty output is deliberate
+    and safe: static fallback knowledge in re_knowledge.py still applies.
+    """
+    active = load_active_patterns(base_dir)
+    if scopes:
+        wanted = set(scopes)
+        active = [p for p in active if p.get("scope") in wanted]
+    if not active:
+        return ""
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for pattern in active:
+        grouped.setdefault(pattern["scope"], []).append(pattern)
+
+    lines = ["ACTIVE JSON KNOWLEDGE PATTERNS (human-approved; do not override verified facts):"]
+    for scope in ("workbook_mapping", "metric_resolution", "validation", "business_plan", "chat"):
+        scoped = grouped.get(scope, [])
+        if not scoped:
+            continue
+        lines.append(f"\n[{scope}]")
+        for p in scoped:
+            lines.append(
+                "- "
+                f"{p.get('rule_id') or p.get('pattern_id')}: "
+                f"{p.get('description')} | "
+                f"condition={p.get('condition')} | "
+                f"action={p.get('action')} | "
+                f"confidence={p.get('confidence')} | "
+                f"evidence_count={p.get('evidence_count')}"
+            )
+    return "\n".join(lines)
+
+
+def load_observations(base_dir: Path | str = KNOWLEDGE_DIR) -> list[dict[str, Any]]:
+    """
+    Debug/UI helper only. Do not call from extraction or prompt runtime paths.
+    """
+    observations_dir = Path(base_dir) / "observations"
+    out: list[dict[str, Any]] = []
+    for path in sorted(observations_dir.glob("*.json")):
+        out.append(_read_json(path))
+    return out

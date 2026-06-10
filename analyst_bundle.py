@@ -24,6 +24,7 @@ import json
 from pathlib import Path
 
 import ssot
+from knowledge_store import knowledge_diagnostics, load_active_patterns
 from metric_catalog import load_metric_catalog
 
 BUNDLE_VERSION = "2026-06-10.1"
@@ -152,6 +153,42 @@ def _identity_checks(bounded_metrics: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def _fired_patterns(bounded_metrics: dict[str, Any]) -> list[dict[str, Any]]:
+    active_by_id = {
+        p.get("rule_id") or p.get("pattern_id"): p
+        for p in load_active_patterns()
+    }
+    fired: list[dict[str, Any]] = []
+    seen = set()
+    for metric_name, rec in bounded_metrics.items():
+        if not isinstance(rec, dict):
+            continue
+        for note in rec.get("validation_notes") or []:
+            text = str(note)
+            marker = "Pattern fired:"
+            if marker not in text:
+                continue
+            rule_id = text.split(marker, 1)[1].split(".", 1)[0].strip()
+            if not rule_id or (metric_name, rule_id) in seen:
+                continue
+            seen.add((metric_name, rule_id))
+            fired.append({
+                "metric": metric_name,
+                "rule_id": rule_id,
+                "scope": (active_by_id.get(rule_id) or {}).get("scope"),
+                "note": text,
+            })
+    return fired
+
+
+def _knowledge_usage(bounded_metrics: dict[str, Any]) -> dict[str, Any]:
+    diagnostics = knowledge_diagnostics()
+    return {
+        **diagnostics,
+        "fired_patterns": _fired_patterns(bounded_metrics),
+    }
+
+
 def build_analyst_bundle(layer: str = "underwriting") -> dict[str, Any]:
     asset = ssot.load_ssot()
     layer_data = asset.get("layers", {}).get(layer)
@@ -221,6 +258,7 @@ def build_analyst_bundle(layer: str = "underwriting") -> dict[str, Any]:
         "verified_facts": verified,
         "issues": issues,
         "identity_checks": _identity_checks(bounded_metrics),
+        "knowledge_usage": _knowledge_usage(bounded_metrics),
         "status_summary": status_summary,
         "business_plan_read": {
             "property_type": _safe_found(raw_insights, "property_type"),

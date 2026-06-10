@@ -12,6 +12,11 @@ This directory stores Collie's structured learning artifacts.
 
 Only this layer should be loaded on normal analysis runs.
 
+Runtime loading is handled by `knowledge_store.py`. It reads only
+`patterns/*.json`, validates each pattern, and returns only entries with
+`status: "active"`. Candidate, draft, rejected, superseded, archived, and
+invalid patterns are ignored.
+
 ## Observation Layer
 
 `observations/*.json` contains reviewed learning candidates created after QC.
@@ -35,3 +40,10 @@ The current JSON policy uses:
 
 GPT can propose a pattern, but it does not decide that the pattern is true. The
 system promotes rules only after repeated reviewed evidence.
+
+The runtime bridge is intentionally small:
+
+`active JSON patterns -> prompt/validation guidance -> Analyst Bundle audit`
+
+Raw observations must not be imported from extraction, validation, mapper, or
+memo code paths.

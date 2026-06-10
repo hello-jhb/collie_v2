@@ -28,6 +28,7 @@ import ssot
 from scenarios._llm import complete, llm_available
 from scenarios.profiles import filter_layer_metrics
 from flexible_extractor import extract_time_series_rows
+from knowledge_store import build_runtime_knowledge_block
 
 
 UPLOAD_DIR = Path("uploads")
@@ -381,6 +382,7 @@ def generate_deal_review() -> dict[str, Any]:
 
     # Phase 1 — bounded analyst-checklist metrics with schema validation
     bounded_metrics = underwriting.get("bounded_metrics", {}) or {}
+    business_plan_patterns = build_runtime_knowledge_block(["business_plan"])
 
     # Build the user prompt
     user_prompt = f"""\
@@ -409,6 +411,9 @@ with explicit provenance. Status-based citation rules apply (see system prompt).
 
 ===== TIME SERIES (multi-year projections — use for NOI / cash flow trajectory) =====
 {time_series_block}
+
+===== ACTIVE BUSINESS-PLAN KNOWLEDGE PATTERNS (interpretive only; do not create facts) =====
+{business_plan_patterns or '(no active business-plan patterns)'}
 
 Now write the deal memo following the structure in your system prompt.
 Adapt sections to this deal's type. Be specific. Cite cell references where

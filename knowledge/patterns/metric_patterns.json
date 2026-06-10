@@ -21,7 +21,11 @@
       "rules": [
         {
           "rule_id": "hold_period_gt_24_means_months",
-          "status": "candidate",
+          "status": "active",
+          "scope": "validation",
+          "description": "Hold periods stored as values greater than 24 are usually month counts unless the label explicitly says years.",
+          "condition": "metric == 'hold_period' and 24 < numeric_value <= 360 and no explicit years label",
+          "action": "interpret as months and normalize to years using numeric_value / 12",
           "pattern": {
             "condition": "metric == 'hold_period' and numeric_value > 24 and unit_label is absent",
             "interpretation": {
@@ -30,7 +34,7 @@
               "normalization": "numeric_value / 12"
             }
           },
-          "confidence": 0.7,
+          "confidence": 0.9,
           "evidence_count": 1,
           "contradiction_count": 0,
           "evidence_sources": [
@@ -50,6 +54,10 @@
         {
           "rule_id": "debt_assumptions_can_live_in_inputs",
           "status": "candidate",
+          "scope": "metric_resolution",
+          "description": "Debt assumptions may live in inputs or assumptions tabs when a dedicated debt tab is missing or incomplete.",
+          "condition": "debt metrics missing from debt tab or no dedicated debt tab exists",
+          "action": "search inputs and assumptions tabs for leverage/debt assumptions",
           "pattern": {
             "condition": "role == 'inputs' and labels include any of ['loan', 'debt', 'ltv', 'spread', 'sofr', 'libor', 'cap']",
             "interpretation": {
@@ -81,7 +89,11 @@
       "rules": [
         {
           "rule_id": "monthly_noi_requires_period_conversion",
-          "status": "candidate",
+          "status": "active",
+          "scope": "validation",
+          "description": "Monthly NOI tables must be aggregated before being presented as annual NOI trajectory.",
+          "condition": "metric contains 'NOI' and source table column headers are monthly",
+          "action": "group monthly columns by year and sum them into annual totals; store periodicity and aggregation metadata",
           "pattern": {
             "condition": "metric contains 'NOI' and column_headers are months",
             "interpretation": {
@@ -89,7 +101,7 @@
               "annualization": "sum twelve monthly periods or multiply representative stabilized month by 12 only when explicitly supported"
             }
           },
-          "confidence": 0.65,
+          "confidence": 0.9,
           "evidence_count": 1,
           "contradiction_count": 0,
           "evidence_sources": [

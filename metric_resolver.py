@@ -24,10 +24,24 @@ In Phase 2 a GPT resolver will be inserted between step 1 and step 3 to
 disambiguate when multiple candidates survive validation.
 """
 from __future__ import annotations
+from functools import lru_cache
 from typing import Any
 
 
 RESOLVER_VERSION = "phase3.v10"  # identity checks run only after reconciliation
+
+
+@lru_cache(maxsize=1)
+def _active_knowledge_rule_ids() -> set[str]:
+    try:
+        from knowledge_store import load_active_patterns
+        return {
+            str(p.get("rule_id") or p.get("pattern_id"))
+            for p in load_active_patterns()
+            if p.get("scope") in ("metric_resolution", "validation")
+        }
+    except Exception:
+        return set()
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +86,10 @@ def _validate_against_range(value, schema: dict) -> tuple[bool, str | None]:
         and unit == "years"
         and 24 < v <= 360
     ):
+        # Active JSON pattern hold_period_gt_24_means_months documents this
+        # behavior. The code path remains hard-coded domain validation so the
+        # system does not depend on GPT or observations to normalize it.
+        _active_knowledge_rule_ids()
         return True, None
 
     if _in_range(v):

@@ -692,7 +692,10 @@ def _reconcile_bounded_metrics(bounded_metrics: dict, raw_insights: dict | None)
                 source_sheet=hp.get("source_sheet"),
                 source_cell=hp.get("source_cell"),
                 status="verified" if hp.get("status") != "missing" else "inferred",
-                note=f"Normalized Hold Period from {hp_val:g} months to {years:.1f} years.",
+                note=(
+                    f"Pattern fired: hold_period_gt_24_means_months. "
+                    f"Normalized Hold Period from {hp_val:g} months to {years:.1f} years."
+                ),
             )
 
     # 2B. If Hold Period still missing/suspicious, derive from Purchase Date + Exit Date.

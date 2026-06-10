@@ -16,7 +16,7 @@ handle files and labels it has never seen (so it's adaptive).
 """
 from __future__ import annotations
 
-KNOWLEDGE_VERSION = "v1"
+KNOWLEDGE_VERSION = "v2"
 
 
 # ---------------------------------------------------------------------------
@@ -167,4 +167,20 @@ def knowledge_block(*, include: list[str] | None = None) -> str:
     }
     if include is None:
         include = ["period", "deal_level", "debt", "property_type", "identities"]
-    return "\n\n".join(sections[k] for k in include if k in sections)
+    static_block = "\n\n".join(sections[k] for k in include if k in sections)
+
+    # Runtime JSON knowledge is an active-pattern overlay, not a replacement
+    # for the static fallback. It never loads observations and never includes
+    # candidate/draft/rejected patterns.
+    scopes = set()
+    if "sheet_roles" in include:
+        scopes.add("workbook_mapping")
+    if any(k in include for k in ("period", "deal_level", "debt", "property_type", "identities")):
+        scopes.update({"metric_resolution", "validation"})
+    try:
+        from knowledge_store import build_runtime_knowledge_block
+        runtime_block = build_runtime_knowledge_block(sorted(scopes)) if scopes else ""
+    except Exception:
+        runtime_block = ""
+
+    return "\n\n".join(part for part in (static_block, runtime_block) if part)
