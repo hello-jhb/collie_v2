@@ -819,6 +819,15 @@ def ingest_to_ssot_with_layer(filename: str, layer: str) -> dict[str, Any]:
     # Recompute derived metrics now that SSOT has new data
     calc_result = calculations.calculate_derived_metrics()
 
+    # Assemble the reviewable analyst bundle (thin audit/display layer over what
+    # the SSOT now holds). Saved to assets/analyst_bundles/ and returned.
+    try:
+        from analyst_bundle import save_analyst_bundle
+        analyst_bundle = save_analyst_bundle(layer)
+    except Exception as e:
+        _log.error("Analyst bundle failed for %s: %s", filename, e)
+        analyst_bundle = {"error": str(e)}
+
     t_total = time.time() - t_start
     _log.info("INGEST %s — TOTAL %.1fs", filename, t_total)
 
@@ -843,6 +852,8 @@ def ingest_to_ssot_with_layer(filename: str, layer: str) -> dict[str, Any]:
         "bounded_metric_count":  len(bounded_metrics),
         "bounded_status_counts": bounded_status_counts,
         "bounded_cache":         "HIT" if bounded_cache_hit else "MISS",
+        # Reviewable analyst run package
+        "analyst_bundle":        analyst_bundle,
     }
 
 

@@ -263,6 +263,60 @@ def _ssot_panel() -> None:
                     f"(sheet: {s_.get('sheet', '?')})"
                 )
 
+    # Analyst Bundle — the reviewable run package: what Collie looked at,
+    # what it believes, and what it refused to trust. The trust bridge.
+    try:
+        from analyst_bundle import build_analyst_bundle
+        bundle = build_analyst_bundle("underwriting")
+        if "error" not in bundle:
+            ss = bundle.get("status_summary", {})
+            n_issues = len(bundle.get("issues", []))
+            n_verified = len(bundle.get("verified_facts", []))
+            with st.expander(
+                f"🔎 Analyst Bundle — {n_verified} verified / {n_issues} to review",
+                expanded=False,
+            ):
+                wm = bundle.get("workbook_map", {})
+                st.markdown("**Workbook Map** — which tabs Collie read vs skipped")
+                st.caption(
+                    f"{len(wm.get('all_sheets', []))} sheets · "
+                    f"{len(wm.get('skipped_sheets', []))} skipped "
+                    f"({', '.join(wm.get('skipped_sheets', [])[:6])}{'…' if len(wm.get('skipped_sheets', []))>6 else ''})"
+                )
+
+                st.markdown("**Status Summary** — QC health check")
+                st.json(ss)
+
+                bpr = bundle.get("business_plan_read", {})
+                if any(bpr.values()):
+                    st.markdown("**Business-Plan Read** — GPT interpretation (not facts)")
+                    st.json({k: v for k, v in bpr.items() if v})
+
+                st.markdown("**Issues / QC Flags** — what Collie refused to trust")
+                issues = bundle.get("issues", [])
+                if issues:
+                    st.dataframe(
+                        [{"metric": r["metric"], "status": r["status"],
+                          "value": r["value"], "source": f"{r.get('source_sheet')}!{r.get('source_cell')}"}
+                         for r in issues],
+                        use_container_width=True,
+                    )
+                else:
+                    st.caption("None — every bounded metric verified.")
+
+                st.markdown("**Verified Facts** — what Collie believes, with provenance")
+                st.dataframe(
+                    [{"metric": r["metric"], "value": r["value"],
+                      "period": r.get("period"), "status": r["status"],
+                      "source": f"{r.get('source_sheet')}!{r.get('source_cell')}"}
+                     for r in bundle.get("verified_facts", [])],
+                    use_container_width=True,
+                )
+                if bundle.get("bundle_path"):
+                    st.caption(f"Saved: {bundle['bundle_path']}")
+    except Exception:
+        pass
+
 
 # =============================================================================
 # Landing view — scenario picker
