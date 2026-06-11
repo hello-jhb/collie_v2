@@ -44,6 +44,22 @@ AAM_METRIC_IDS: list[str] = [mid for ids in AAM_GROUPS.values() for mid in ids]
 _AAM_SET = set(AAM_METRIC_IDS)
 
 
+# AAM fields that are HARD-CODED INPUTS when a model is built (the modeler types
+# them in; everything else derives from them). When candidates tie on sheet
+# rank, a hard-coded (non-formula) cell beats a formula cell for these fields —
+# read the model the way it was made. Deliberately EXCLUDES purchase_price /
+# total_project_cost / debt_amount: in portfolio models those are aggregates
+# (SUM formulas over per-asset hardcodes — e.g. BAC's $192M = 88+63+41), so the
+# correct deal-level cell is often a formula and a hardcode preference would
+# grab a single asset's slice instead.
+AAM_HARDCODED_INPUTS: set[str] = {
+    "asset_name", "property_type", "location", "total_units", "total_sf",
+    "going_in_cap_rate", "exit_cap_rate",
+    "original_ltv", "interest_rate", "interest_rate_spread", "interest_rate_cap",
+    "purchase_date", "hold_period", "exit_date",
+}
+
+
 def is_aam(metric_id: str) -> bool:
     """True if metric_id belongs to the Audit Appendix Metric set."""
     return metric_id in _AAM_SET

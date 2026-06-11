@@ -221,12 +221,23 @@ def resolve_metric(metric: dict, candidates: list[dict]) -> dict:
     #   1. preferred_sheet_score (lower is better)
     #   2. sheet_tier (effective, lower is better)
     #   3. name_tier (one-pager beats secondary summaries on equal effective tier)
-    #   4. extractor confidence
+    #   4. hardcode rank — for modeler-input metrics (metric carries
+    #      prefer_hardcoded, set by the AAM extractor), a hard-coded cell beats
+    #      a formula cell at the same sheet rank. Candidates without the
+    #      is_hardcoded annotation (legacy paths) are never penalized.
+    #   5. extractor confidence
     _CONF_TIER = {"exact": 0, "high": 1, "medium": 2, "partial": 3}
+
+    def _hard_rank(s) -> int:
+        if not metric.get("prefer_hardcoded"):
+            return 0
+        return 1 if s["candidate"].get("is_hardcoded") is False else 0
+
     pool.sort(key=lambda s: (
         s["pref_score"],
         s["candidate"].get("sheet_tier", 99),
         s["candidate"].get("name_tier", 99),
+        _hard_rank(s),
         _CONF_TIER.get(s["candidate"]["confidence"], 9),
         -s["candidate"].get("label_ratio", 0),
     ))

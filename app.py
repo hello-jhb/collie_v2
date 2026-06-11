@@ -1141,6 +1141,10 @@ def _aam_source(rec: dict) -> str:
     sheet, cell = rec.get("source_sheet"), rec.get("source_cell")
     if sheet and cell:
         return f"{sheet}!{cell}"
+    if cell:
+        # Derived metrics carry their identity formula here (no sheet), e.g.
+        # "Purchase Price × Going-in Cap Rate" — show it, not "—".
+        return str(cell)
     return "—"
 
 
@@ -1355,7 +1359,9 @@ def _render_aam_appendix(batch_id) -> "pd.DataFrame":
         counts[r["Status"]] = counts.get(r["Status"], 0) + 1
     st.caption("Status — " + " · ".join(f"{k}: {v}" for k, v in sorted(counts.items())))
 
-    n_blanks = sum(counts.get(s, 0) for s in ("missing", "candidate_pool", "suspicious"))
+    # Matches aam_extractor._GAP_STATUSES: GPT fills true blanks and flagged-wrong
+    # rows only — it never re-fills candidate_pool (deterministic values stand).
+    n_blanks = sum(counts.get(s, 0) for s in ("missing", "suspicious"))
     from scenarios._llm import llm_available
     if not llm_available():
         st.button("🤖 Fill blanks with GPT", disabled=True, width="stretch",
