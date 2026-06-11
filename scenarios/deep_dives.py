@@ -32,13 +32,49 @@ UPLOAD_DIR = Path("uploads")
 # Shared context builders
 # ---------------------------------------------------------------------------
 
+_NAME_TO_ID: dict[str, str] | None = None
+
+
+def _name_to_id() -> dict[str, str]:
+    """Lazy normalized {name-or-alias: metric_id} index over the catalog."""
+    global _NAME_TO_ID
+    if _NAME_TO_ID is None:
+        from metric_catalog import load_metric_catalog
+        from flexible_extractor import normalize_text
+        idx: dict[str, str] = {}
+        for m in load_metric_catalog():
+            idx[normalize_text(m["metric_name"])] = m["metric_id"]
+            for a in m.get("aliases", []) or []:
+                idx.setdefault(normalize_text(a), m["metric_id"])
+        _NAME_TO_ID = idx
+    return _NAME_TO_ID
+
+
+def _resolve_bounded(bounded: dict, name: str) -> dict | None:
+    """
+    Look up a bounded record by canonical name, falling back to an alias/id
+    match so a key mismatch can never silently drop a metric (e.g. Levered IRR
+    stored under a non-canonical key).
+    """
+    rec = bounded.get(name)
+    if rec:
+        return rec
+    from flexible_extractor import normalize_text
+    mid = _name_to_id().get(normalize_text(name))
+    if mid:
+        for r in bounded.values():
+            if r.get("metric_id") == mid:
+                return r
+    return None
+
+
 def _bounded_pretty(bounded: dict, metric_names: list[str]) -> str:
     """Pretty-print a subset of bounded metrics for a deep-dive prompt."""
     if not bounded:
         return "(no bounded metrics extracted)"
     lines = []
     for name in metric_names:
-        rec = bounded.get(name)
+        rec = _resolve_bounded(bounded, name)
         if not rec:
             lines.append(f"  - {name}: MISSING")
             continue

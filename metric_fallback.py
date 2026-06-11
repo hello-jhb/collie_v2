@@ -136,6 +136,12 @@ def _resolve_target_sheets(metric: dict, available_sheets: list[str]) -> list[st
     return matches[:2]
 
 
+def _system_with_rules() -> str:
+    """SYSTEM_PROMPT + any active metric_resolution knowledge patterns."""
+    from knowledge_store import with_active_rules
+    return with_active_rules(SYSTEM_PROMPT, ["metric_resolution"])
+
+
 def _one_metric_gpt_call(metric: dict, sheet_name: str, sheet_text: str) -> dict:
     """Run a single GPT call for one metric on one sheet."""
     user_msg = (
@@ -154,7 +160,7 @@ def _one_metric_gpt_call(metric: dict, sheet_name: str, sheet_text: str) -> dict
             model=MODEL_FAST,
             temperature=0.0,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": _system_with_rules()},
                 {"role": "user",   "content": user_msg},
             ],
         )

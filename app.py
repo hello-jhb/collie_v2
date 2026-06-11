@@ -143,6 +143,9 @@ _SESSION_DEFAULTS: dict = {
     # Bumped each time GPT blank-fill runs, so the data_editor rebuilds cleanly
     # from the updated records instead of replaying a stale edit delta.
     "aam_fill_version":      0,
+    # Batches for which the user explicitly requested analysis (staged: facts
+    # are confirmed first, then analysis is a separate deliberate step).
+    "aam_analysis_requested": set(),
 }
 
 
@@ -203,6 +206,7 @@ def _wipe_uploads_and_reset_ssot() -> None:
     st.session_state.aam_batch_id = None
     st.session_state.aam_confirmed_batches = set()
     st.session_state.aam_fill_version = 0
+    st.session_state.aam_analysis_requested = set()
 
 
 def _activate_scenario(scenario_key: str) -> None:
@@ -276,6 +280,28 @@ def _ssot_panel() -> None:
                     f"**{s_['metric_name']}** — add alias: `{s_['found_as_label']}` "
                     f"(sheet: {s_.get('sheet', '?')})"
                 )
+
+    # JSON Knowledge diagnostics — which human-approved patterns are live.
+    # Only `active` patterns influence runtime prompts; candidates/invalid don't.
+    try:
+        from knowledge_store import knowledge_diagnostics
+        kd = knowledge_diagnostics()
+        n_active = kd.get("active_patterns_loaded", 0)
+        n_cand = len(kd.get("candidate_patterns_ignored", []) or [])
+        n_inv = len(kd.get("invalid_patterns", []) or [])
+        with st.expander(
+            f"🧠 JSON Knowledge — {n_active} active / {n_cand} candidate / {n_inv} invalid",
+            expanded=False,
+        ):
+            st.caption(
+                "Only **active** patterns are injected into runtime prompts "
+                "(workbook mapping, AAM extraction, blank-fill, resolver, "
+                "business-plan). Candidates are evidence awaiting human promotion; "
+                "invalid are skipped."
+            )
+            st.json(kd)
+    except Exception:
+        pass
 
     # Analyst Bundle — the reviewable run package: what Collie looked at,
     # what it believes, and what it refused to trust. The trust bridge.
@@ -564,9 +590,17 @@ def render_scenario() -> None:
     # extract the Audit Appendix Metrics, let the human verify them, and BLOCK
     # until they confirm. The full pipeline + analysis run only after confirm.
     if scenario_key == "deal_review" and st.session_state.uploaded_filenames:
-        if frozenset(st.session_state.uploaded_filenames) not in st.session_state.aam_confirmed_batches:
+        batch_id = frozenset(st.session_state.uploaded_filenames)
+        # Step A — verify facts in the audit appendix, then confirm.
+        if batch_id not in st.session_state.aam_confirmed_batches:
             _render_aam_gate(agent)
-            # Allow follow-up Q&A while the appendix is being reviewed.
+            user_input = st.chat_input("Ask a follow-up question...")
+            _handle_chat_input(agent, user_input)
+            return
+        # Step B — facts are locked; generating the analysis is a separate,
+        # deliberate step (so confirm isn't one big jump into analysis).
+        if batch_id not in st.session_state.aam_analysis_requested:
+            _render_post_confirm(agent)
             user_input = st.chat_input("Ask a follow-up question...")
             _handle_chat_input(agent, user_input)
             return
@@ -888,7 +922,7 @@ def _render_aam_gate(agent: AgentSession) -> None:
         elif st.button(f"🤖 Fill {n_blanks} blank(s) with GPT", width="stretch"):
             _fill_aam_blanks(records)
     with confirm_col:
-        if st.button("✅ Confirm & generate analysis", type="primary", width="stretch"):
+        if st.button("✅ Confirm verified facts", type="primary", width="stretch"):
             _confirm_aam_and_ingest(agent, _collect_verified(records, edited))
 
 
@@ -952,6 +986,29 @@ def _confirm_aam_and_ingest(agent: AgentSession, verified: dict) -> None:
 
     st.session_state.aam_confirmed_batches.add(batch_id)
     st.rerun()
+
+
+def _render_post_confirm(agent: AgentSession) -> None:
+    """
+    Staging step between 'facts confirmed' and 'analysis generated' so the
+    confirm click isn't one big jump. Shows a locked-facts summary and a
+    separate, deliberate 'generate' button.
+    """
+    batch_id = frozenset(st.session_state.uploaded_filenames)
+    uw = ssot.load_ssot().get("layers", {}).get("underwriting", {}) or {}
+    bm = uw.get("bounded_metrics", {}) or {}
+    n_verified = sum(1 for r in bm.values() if r.get("human_verified"))
+    n_traced = sum(1 for r in bm.values() if r.get("traced"))
+
+    st.success(
+        f"✅ Facts confirmed and locked — **{n_verified}** human-verified, "
+        f"**{n_traced}** reached via formula trace. SSOT is the source of truth "
+        f"for this deal."
+    )
+    st.caption("Next is a separate step: generate the Snapshot and on-demand analyses.")
+    if st.button("📝 Generate Snapshot & analyses →", type="primary", width="stretch"):
+        st.session_state.aam_analysis_requested.add(batch_id)
+        st.rerun()
 
 
 def _run_scenario_for_batch(agent: AgentSession, scenario_key: str) -> None:

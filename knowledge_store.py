@@ -253,6 +253,25 @@ def build_runtime_knowledge_block(
     return "\n".join(lines)
 
 
+def with_active_rules(system_prompt: str, scopes: list[str]) -> str:
+    """
+    Append the active-pattern runtime block to a GPT system prompt.
+
+    No-op (returns the prompt unchanged) when no active patterns match the
+    scopes — so wiring this into a call site never changes behavior until a
+    human promotes a pattern to `active`.
+    """
+    block = build_runtime_knowledge_block(scopes)
+    if not block:
+        return system_prompt
+    return (
+        system_prompt
+        + "\n\n===== ACTIVE KNOWLEDGE (human-approved rules; apply when relevant, "
+          "never override verified facts) =====\n"
+        + block
+    )
+
+
 def load_observations(base_dir: Path | str = KNOWLEDGE_DIR) -> list[dict[str, Any]]:
     """
     Debug/UI helper only. Do not call from extraction or prompt runtime paths.

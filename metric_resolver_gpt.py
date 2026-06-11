@@ -357,6 +357,12 @@ def _candidates_substantially_agree(candidates: list[dict]) -> bool:
         return all(v == values[0] for v in values)
 
 
+def _system_with_rules() -> str:
+    """SYSTEM_PROMPT + any active metric_resolution knowledge patterns."""
+    from knowledge_store import with_active_rules
+    return with_active_rules(SYSTEM_PROMPT, ["metric_resolution"])
+
+
 def _gpt_pick(metric: dict, candidates: list[dict], context_by_idx: dict[int, dict]) -> dict:
     """Send candidates + context to GPT, get back chosen_index + reasoning."""
     blocks = [
@@ -377,7 +383,7 @@ def _gpt_pick(metric: dict, candidates: list[dict], context_by_idx: dict[int, di
             model=MODEL_FAST,
             temperature=0.0,
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": _system_with_rules()},
                 {"role": "user",   "content": user_msg},
             ],
         )

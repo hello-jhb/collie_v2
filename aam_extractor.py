@@ -284,11 +284,13 @@ def _aam_gpt_call(gaps: list[dict], pairs: list[dict]) -> dict[str, dict]:
     )
 
     try:
+        from knowledge_store import with_active_rules
+        system_content = with_active_rules(_AAM_SYSTEM_PROMPT, ["metric_resolution", "validation"])
         response = client.chat.completions.create(
             model=MODEL_FAST,
             temperature=0.0,
             messages=[
-                {"role": "system", "content": _AAM_SYSTEM_PROMPT},
+                {"role": "system", "content": system_content},
                 {"role": "user",   "content": user_msg},
             ],
         )
@@ -314,6 +316,63 @@ def _as_num(v: Any) -> float | None:
         return None
 
 
+def _to_date(v: Any):
+    import datetime as _dt
+    if isinstance(v, _dt.datetime):
+        return v.date()
+    if isinstance(v, _dt.date):
+        return v
+    if isinstance(v, str):
+        for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%m/%d/%Y", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                return _dt.datetime.strptime(v[:19], fmt).date()
+            except ValueError:
+                continue
+    return None
+
+
+def _derived_hold_years(records: dict[str, Any]) -> float | None:
+    """Years between Purchase Date and Exit Date, if both are present."""
+    pd_rec, ed_rec = records.get("Purchase Date"), records.get("Exit Date")
+    if not pd_rec or not ed_rec:
+        return None
+    a = _to_date(pd_rec.get("normalized_value") or pd_rec.get("raw_value"))
+    b = _to_date(ed_rec.get("normalized_value") or ed_rec.get("raw_value"))
+    if a and b:
+        return abs((b - a).days) / 365.25
+    return None
+
+
+def _interpret_hold_value(v: float, derived: float | None) -> tuple[float, str] | None:
+    """
+    Decide whether a raw Hold Period value should be read as months and
+    converted to years. Returns (years, note) if a conversion is warranted,
+    else None (leave as-is).
+
+      - With dates: pick the interpretation (years vs months) closest to the
+        Purchase->Exit span. Disambiguates 12 / 18 / 24 correctly.
+      - Without dates: fall back to the >24 month heuristic.
+    """
+    if derived is not None and derived > 0:
+        fits_years = abs(v - derived)
+        fits_months = abs(v / 12.0 - derived)
+        if fits_months + 1e-9 < fits_years:
+            years = round(v / 12.0, 1)
+            return years, (
+                f"Hold Period {v:g} read as MONTHS via date cross-check "
+                f"(Purchase->Exit ~ {derived:.1f}y; {v:g}/12 ~ {years:.1f}y fits better "
+                f"than {v:g}y)."
+            )
+        return None  # v already fits as years
+    if 24 < v <= 360:
+        years = round(v / 12.0, 1)
+        return years, (
+            f"Pattern fired: hold_period_gt_24_means_months. Normalized {v:g} "
+            f"months -> {years:.1f} years (no dates available to cross-check)."
+        )
+    return None
+
+
 def _normalize_aam(records: dict[str, Any]) -> None:
     """
     Representation-only normalization, scoped to AAM fields, applied in place.
@@ -325,21 +384,21 @@ def _normalize_aam(records: dict[str, Any]) -> None:
         (the shared `ratio` formatter renders sub-1.5 ratios as %, which is
         correct for cap rates / LTV but wrong for an equity multiple).
     """
-    # Hold Period: months -> years.
+    # Hold Period: months -> years. Prefer a date cross-check (Purchase + Exit
+    # dates) which disambiguates the ambiguous low values (12 / 18 / 24) the raw
+    # >24 threshold can't; fall back to the threshold only when no dates exist.
     hp = records.get("Hold Period")
     if hp and hp.get("status") != "missing":
         v = _as_num(hp.get("normalized_value"))
         if v is None:
             v = _as_num(hp.get("raw_value"))
-        if v is not None and 24 < v <= 360:
-            years = round(v / 12.0, 1)
-            hp["normalized_value"] = years
-            hp["display_value"] = f"{years:.1f} years"
-            hp.setdefault("validation_notes", []).insert(
-                0,
-                f"Pattern fired: hold_period_gt_24_means_months. "
-                f"Normalized {v:g} months -> {years:.1f} years.",
-            )
+        if v is not None and v > 0:
+            interp = _interpret_hold_value(v, _derived_hold_years(records))
+            if interp:
+                years, note = interp
+                hp["normalized_value"] = years
+                hp["display_value"] = f"{years:.1f} years"
+                hp.setdefault("validation_notes", []).insert(0, note)
 
     # Equity Multiple: always render as a multiplier.
     em = records.get("Equity Multiple")
