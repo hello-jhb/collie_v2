@@ -101,13 +101,29 @@ st.markdown(
     padding: 2px 14px;
     font-size: 12px;
     min-height: 30px;
-    border: 1px solid #99f6e4;
+    border: 1px solid #0f766e;
     background: #f0fdfa;
     color: #0f766e;
   }
   .st-key-dd_chips .stButton button:hover {
     border-color: #14b8a6;
     background: #ccfbf1;
+  }
+
+  /* Square corners everywhere EXCEPT buttons (mockup spec) */
+  [data-testid="stVerticalBlockBorderWrapper"],
+  [data-testid="stForm"],
+  [data-testid="stExpander"] details,
+  [data-testid="stExpander"] summary,
+  [data-testid="stChatMessage"],
+  [data-testid="stFileUploaderDropzone"],
+  [data-testid="stAlert"],
+  [data-testid="stDataFrame"],
+  [data-testid="stDataEditor"],
+  .stTextArea textarea, .stTextInput input,
+  div[data-baseweb="textarea"], div[data-baseweb="input"],
+  div[data-baseweb="base-input"] {
+    border-radius: 0 !important;
   }
 
   /* Scoped workspace header */
@@ -718,7 +734,7 @@ def render_scenario() -> None:
 
 _DEEP_DIVE_SPECS = [
     ("capital_structure", "Capital Structure"),
-    ("cash_flow",         "Cash Flow / NOI"),
+    ("cash_flow",         "Cash Flow/NOI"),
     ("return_profile",    "Return Profile"),
     ("capex_plan",        "CapEx Plan"),
     ("key_risks",         "Key Risks"),
@@ -975,26 +991,26 @@ def _render_chat_column(agent: AgentSession, suggestions: bool = False) -> None:
                         _fold_to_outcome(m["content"])
                         st.rerun()
 
-    # Suggested-analysis chips (the 5 deep-dives) sit with the prompt box —
-    # pill-styled via the .st-key-dd_chips CSS scope. Results land in the
+    # Prompt box (per mockup): ONE bordered card holding the suggested-analysis
+    # chips directly above the prompt area, with a full-width Send below. Chips
+    # are pill-styled via the .st-key-dd_chips CSS scope; results land in the
     # transcript above, where "Add to Outcome" folds them into the middle.
-    if suggestions:
-        with st.container(key="dd_chips"):
-            st.caption("Suggested analyses")
-            row1 = st.columns(3)
-            row2 = st.columns(3)
-            slots = row1 + row2
-            for i, (key, label) in enumerate(_DEEP_DIVE_SPECS):
-                with slots[i]:
-                    if st.button(label, key=f"dd_{key}"):
-                        _run_deep_dive(agent, key, label)
-
-    with st.form("da_chat", clear_on_submit=True):
-        txt = st.text_area(
-            "Ask", height=70, label_visibility="collapsed",
-            placeholder="Ask a follow-up question…",
-        )
-        sent = st.form_submit_button("Send", type="primary", width="stretch")
+    with st.container(border=True, key="chat_box"):
+        if suggestions:
+            with st.container(key="dd_chips"):
+                row1 = st.columns(3)
+                row2 = st.columns(3)
+                slots = row1 + row2
+                for i, (key, label) in enumerate(_DEEP_DIVE_SPECS):
+                    with slots[i]:
+                        if st.button(label, key=f"dd_{key}"):
+                            _run_deep_dive(agent, key, label)
+        with st.form("da_chat", clear_on_submit=True, border=False):
+            txt = st.text_area(
+                "Ask", height=90, label_visibility="collapsed",
+                placeholder="Ask a follow-up question…",
+            )
+            sent = st.form_submit_button("Send", type="primary", width="stretch")
     if sent and txt.strip():
         try:
             with st.spinner("Thinking…"):
