@@ -36,7 +36,7 @@ _SCENARIO_RUNNER = {
 # =============================================================================
 
 st.set_page_config(
-    page_title="Fantastic Beast & Where to Find Them",
+    page_title="Moose HQ",
     page_icon="🏢",
     layout="wide",
 )
@@ -553,7 +553,7 @@ def _ssot_panel() -> None:
 def render_landing() -> None:
     _ensure_session_state()  # defensive safety net
     st.markdown(
-        '<div class="hero-title">Fantastic Beast & Where to Find Them</div>',
+        '<div class="hero-title">Moose HQ</div>',
         unsafe_allow_html=True,
     )
     st.markdown(
