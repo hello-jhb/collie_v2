@@ -766,11 +766,15 @@ _DEEP_DIVE_SPECS = [
 
 _REPORT_SYSTEM = (
     "You are a real estate analyst writing the final deal memo. You are given the "
-    "verified facts, the snapshot, and the analyses the user chose to keep. "
+    "verified facts, the Deal Brief, the Initial View (the investment reasoning — "
+    "return composition, value creation, leverage risk, what breaks the deal), the "
+    "snapshot, and the analyses the user chose to keep. "
     "Memorialize them into one clean, well-structured markdown report. Use ONLY "
-    "the content provided — do not invent figures. Keep section headings; tighten "
-    "prose; remove redundancy. Present figures as bullet points; NEVER use "
-    "markdown tables. This report is the deal's source of truth."
+    "the content provided — do not invent figures. PRESERVE the Initial View's "
+    "judgment (prefer facts over adjectives — keep the return-source attribution "
+    "and risk flags; never soften them into generic praise). Keep section "
+    "headings; tighten prose; remove redundancy. Present figures as bullet points; "
+    "NEVER use markdown tables. This report is the deal's source of truth."
 )
 
 
@@ -1109,6 +1113,15 @@ def _generate_report() -> None:
     brief_md = fin.get("brief_md") or (st.session_state.get("model_brief") or {}).get("brief_md")
     if brief_md:
         parts.append("## Deal Brief\n" + brief_md)
+    # Carry the Layer 3 reasoning (Initial View) into the report, right after the
+    # read. Prefer the live session view, fall back to the persisted SSOT copy.
+    iv = (st.session_state.get("investment_view") or {}).get("view_md")
+    if not iv:
+        iv = (((ssot.load_ssot().get("layers", {}) or {})
+               .get("underwriting", {}) or {}).get("initial_view"))
+    if iv and iv.strip():
+        iv = iv.replace("### Initial View", "", 1).strip()
+        parts.append("## Initial View\n" + iv)
     fact_lines = []
     for mid in aam.AAM_METRIC_IDS:
         rec = bm.get(name_by_id.get(mid, ""))
@@ -1629,7 +1642,39 @@ def _render_model_brief(batch_id) -> None:
         st.markdown(final_md or "_(empty)_")
 
     if scored is not None:
+        _render_investment_view(batch_id, brief, scored)
         _render_trust_panel(scored)
+
+
+def _ensure_investment_view(batch_id, brief: dict, scored: dict) -> dict:
+    """Layer 3 — compute the deal analytics and write the Initial View once per
+    batch (cached in session). Reasons only over verified facts."""
+    if (st.session_state.get("investment_view_batch") == batch_id
+            and st.session_state.get("investment_view")):
+        return st.session_state.investment_view
+    from investment_intel import build_investment_view
+    try:
+        view = build_investment_view(scored, brief.get("identity"))
+    except Exception as e:
+        view = {"view_md": "", "analytics": {}, "llm": False, "error": str(e)}
+    st.session_state.investment_view = view
+    st.session_state.investment_view_batch = batch_id
+    return view
+
+
+def _render_investment_view(batch_id, brief: dict, scored: dict) -> None:
+    """The Initial View: what the verified facts MEAN — return composition, value
+    creation, leverage risk, what breaks the deal. Reasoning, not filler."""
+    view = _ensure_investment_view(batch_id, brief, scored)
+    md = (view or {}).get("view_md")
+    if not md:
+        return
+    with st.container(border=True):
+        st.markdown(md)
+        flags = (view.get("analytics") or {}).get("flags") or []
+        tail = f"{len(flags)} fragility flag(s)" if flags else "no fragility flags"
+        engine = "written from computed analytics" if view.get("llm") else "deterministic analytics"
+        st.caption(f"Layer 3 · {engine} over {view.get('n_verified', 0)} verified facts · {tail}.")
 
 
 def _ensure_finalized_brief(batch_id, brief: dict, scored: dict) -> dict:
@@ -1858,9 +1903,14 @@ def _persist_brief_to_ssot(batch_id) -> None:
         pass
     try:
         s = ssot.load_ssot()
-        s.setdefault("layers", {}).setdefault("underwriting", {})["deal_brief"] = (
-            finalized.get("brief_md") or brief.get("brief_md")
-        )
+        uw = s.setdefault("layers", {}).setdefault("underwriting", {})
+        uw["deal_brief"] = finalized.get("brief_md") or brief.get("brief_md")
+        # Layer 3 — persist the Initial View + computed analytics (the system
+        # remembers the reasoning, not just the facts).
+        view = st.session_state.get("investment_view") or {}
+        if view.get("view_md"):
+            uw["initial_view"] = view["view_md"]
+            uw["deal_analytics"] = view.get("analytics")
         ssot.save_ssot(s)
     except Exception:
         pass

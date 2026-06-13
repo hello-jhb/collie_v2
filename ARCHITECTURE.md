@@ -8,9 +8,15 @@ not a mandatory confirm.
 
 ```
 Upload → Orient(cached) → Read key tabs whole → Comprehend(brief+facts)
-       → Trust engine → Finalize(verified only) → Persist as SSOT
-       → Deep dives on demand → Report
+       → Trust engine → Finalize(verified only) → Investment Intelligence(Initial View)
+       → Persist as SSOT → Deep dives on demand → Report
 ```
+
+The engine is organized as the three layers of the
+[Deal Analysis Intel Guideline](Real%20Estate/Play%20AI/Collie/Knowledge/Deal%20Analysis%20Intel%20Guideline.rtf):
+**Layer 1 Navigation** (orient — read like an IC member),
+**Layer 2 Fact / Visible SSOT** (brief facts + trust confidence), and
+**Layer 3 Investment Intelligence** (what the facts *mean* — the Initial View).
 
 See the day-by-day rationale in [DEVLOG_2026-06-10](DEVLOG_2026-06-10.md),
 [DEVLOG_2026-06-11](DEVLOG_2026-06-11.md), and
@@ -28,10 +34,11 @@ See the day-by-day rationale in [DEVLOG_2026-06-10](DEVLOG_2026-06-10.md),
 | 4 | **Comprehend (Model Brief)** | `model_brief.py:build_model_brief` | ONE strong-model read → `{identity, facts[cell-cited], brief{overview, key_stats, debt, returns, model_structure}}`. Disk-cached by hash+version+model | 1× gpt-4o | brief dict (narrative + structured facts) |
 | 5 | **Trust engine** | `trust_engine.py:score_facts` | Score every cited fact on 5 signals → verdict show/flag/omit. Replaces the human gate | 1× gpt-4o (challenge) | facts + `trust` block + summary |
 | 6 | **Finalize** | `model_brief.py:finalize_brief` | Rewrite narrative from verified facts only; flagged → "(unverified)", omitted dropped. Deterministic fallback appends a note. The "no wrong data" guarantee | 1× gpt-4o | final `brief_md` |
-| 7 | **Render (gate demoted)** | `app.py:_render_model_brief`, `_render_trust_panel` | Brief is the hero; 22-field checklist collapsed to an optional expander. "Run analysis →" always enabled — no mandatory human confirm | — | UI |
-| 8 | **Persist brief as SSOT** | `app.py:_persist_brief_to_ssot` → `ssot.write_layer` | Verified brief facts written as the underwriting SSOT (`metrics` + `bounded_metrics`). Omitted dropped, flagged→`suspicious`, displays magnitude-normalized. No re-extraction — one fact set carries through | — | `layers.underwriting` SSOT |
-| 9 | **Deep dives (on demand)** | `scenarios/deep_dives.py:focused_dive` | Pick the topic's own sheets by name-keyword, read whole, extract facts+narrative, run the same trust chain scoped to the dive's sheets, finalize, append a Fact Check | 3× gpt-4o (read → challenge → finalize) | trust-scored section |
-| 10 | **Report → SSOT** | `app.py:_generate_report` | Memorialize verified facts + brief + kept findings into one report; persist as `deal_report` | 1× gpt-4o | final report md |
+| 7 | **Investment Intelligence (Layer 3)** | `investment_intel.py:build_investment_view` | Reason over verified facts only: compute deal analytics deterministically (NOI bridge, value-creation split, return attribution, leverage accretion, fragility flags), then GPT *explains* the computed deltas — it may not invent or recompute. Renders the **Initial View**; deterministic template when no key | 1× gpt-4o | `view_md` + `analytics` |
+| 8 | **Render (gate demoted)** | `app.py:_render_model_brief`, `_render_investment_view`, `_render_trust_panel` | Brief is the hero; Initial View sits beneath it; 22-field checklist collapsed to an optional expander. "Run analysis →" always enabled — no mandatory human confirm | — | UI |
+| 9 | **Persist brief as SSOT** | `app.py:_persist_brief_to_ssot` → `ssot.write_layer` | Verified brief facts written as the underwriting SSOT (`metrics` + `bounded_metrics`); `initial_view` + `deal_analytics` persisted too. Omitted dropped, flagged→`suspicious`, magnitude-normalized. No re-extraction | — | `layers.underwriting` SSOT |
+| 10 | **Deep dives (on demand)** | `scenarios/deep_dives.py:focused_dive` | Pick the topic's own sheets by name-keyword, read whole, extract facts+narrative, run the same trust chain scoped to the dive's sheets, finalize, append a Fact Check | 3× gpt-4o (read → challenge → finalize) | trust-scored section |
+| 11 | **Report → SSOT** | `app.py:_generate_report` | Memorialize verified facts + brief + kept findings into one report; persist as `deal_report` | 1× gpt-4o | final report md |
 
 ---
 
@@ -55,7 +62,36 @@ otherwise grounded                                      → show  (medium)
 
 ---
 
-## 3. Supporting & fallback modules
+## 3. Layer 3 — Investment Intelligence (`investment_intel.py`)
+
+The reasoning layer. It answers "what do the facts *mean*?" without producing
+filler, using the same trick as the trust engine: **code computes the analytics,
+GPT only explains them.** It runs over verified (`verdict == show`) facts only,
+so it can never reason on a fabricated number.
+
+**Deterministic analytics** (`compute_analytics`) — pure arithmetic, no LLM:
+
+| Analytic | Formula | Tells you |
+|----------|---------|-----------|
+| Cap spread | `exit_cap − going_in_cap` (bps) | Conservative (expansion) vs aggressive (compression) exit |
+| NOI bridge | `exit_NOI / going_in_NOI − 1`, + CAGR over hold | How much operations grow |
+| Value bridge | `ΔV = (N₁−N₀)/c₀` (operations) `+ N₁·(1/c₁−1/c₀)` (revaluation) | Is the gain *earned* (ops) or *repriced* (cap) |
+| Leverage accretion | `levered_IRR − unlevered_IRR` (pts) | Is debt helping or just adding risk |
+| Development spread | `yield_on_cost − exit_cap` (bps) | The create-vs-buy margin |
+| Fragility flags | floating-rate, LTV > 70% / LTC > 75%, DSCR < 1.25×, debt-yield < 8%, cash-on-cash < 5%, exit-dependent (revaluation > 50%) | What could break the deal |
+
+Missing pricing legs are derived from the cap identity (e.g. `going_in_NOI =
+price × cap`) so the bridges still compute. The **interpretation pass** (`interpret`,
+1× gpt-4o, temp 0.2) is handed those computed deltas + the verified facts and is
+forbidden to invent or recompute — every adjective must trace to an analytic
+("prefer facts over adjectives", with the guideline's good/bad examples baked in).
+No key → a deterministic template renders the analytics as prose, so Layer 3 is
+fully testable headless. Output renders as the **Initial View** beneath the brief
+and persists to the SSOT as `initial_view` + `deal_analytics`.
+
+---
+
+## 4. Supporting & fallback modules
 
 The legacy gated pipeline is **not deleted** — it is the no-key fallback
 (deterministic gate path) and still powers the separate `perf_vs_plan`
@@ -74,7 +110,7 @@ scenario. It is simply off the deal-review-with-key critical path.
 
 ---
 
-## 4. Models & caches
+## 5. Models & caches
 
 - **gpt-4o** — comprehension surfaces: brief, challenge, finalize, dives, agent loop.
 - **gpt-4o-mini** — cost-sensitive bulk: sheet classifier, insight pass, section reader, pool resolver.
@@ -82,7 +118,7 @@ scenario. It is simply off the deal-review-with-key critical path.
 
 ---
 
-## 5. Known trade-offs / open items (as of 2026-06-12)
+## 6. Known trade-offs / open items (as of 2026-06-12)
 
 - **Orientation over-labels "summary"** (~21 tabs on St Regis incl. DW-template sheets). Harmless to the brief (name-tier ordering saves the read) but the orientation panel is noisy — tighten summary/inputs thresholds.
 - **Vestigial 22-field appendix** still computes on the brief path (collapsed, deterministic) though it drives nothing.
