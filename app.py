@@ -822,11 +822,16 @@ def _render_process_inputs(files, batch_id, confirmed: bool) -> None:
         accept_multiple_files=True, key="da_upload",
     )
     if uploaded:
+        # Streamlit Cloud's filesystem is ephemeral — a rerun or redeploy can
+        # wipe uploads/ while the uploader still holds the bytes in memory. So
+        # ALWAYS re-persist any file whose disk copy is missing, not just on a
+        # new upload. Otherwise downstream file reads hit FileNotFoundError.
+        for uf in uploaded:
+            dest = UPLOAD_DIR / uf.name
+            if not dest.exists():
+                dest.write_bytes(uf.getbuffer())
         current = {f.name for f in uploaded}
         if current != st.session_state.uploaded_filenames:
-            for uf in uploaded:
-                if uf.name not in st.session_state.uploaded_filenames:
-                    (UPLOAD_DIR / uf.name).write_bytes(uf.getbuffer())
             st.session_state.uploaded_filenames = current
             st.rerun()
 
