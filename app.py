@@ -1151,61 +1151,38 @@ def _generate_report() -> None:
 
 
 def _run_deep_dive(agent: AgentSession, key: str, label: str) -> None:
-    """Run a deep-dive THROUGH THE AGENT (it re-reads the relevant workbook
-    sheets with its file tools before writing — the way an analyst answers
-    "dig into returns"), and land the result in the chat transcript where the
-    user can fold it into the Outcome. Falls back to the static single-shot
-    dive if the agent path fails. No inline render — a rerun shows it."""
+    """Focused analysis: read the topic's sheets WHOLE and summarize in one pass
+    (the cashflow/NOI dive reads the NOI/proforma tabs; capital structure reads
+    the debt tabs; etc.) — fast and grounded in the real sheet, vs the old
+    agentic re-read. Lands in the chat transcript where it can fold to the
+    Outcome. st.rerun() is OUTSIDE the guard (it works by raising)."""
     from scenarios._llm import llm_available
-    from scenarios.deep_dives import agent_dive_instruction, run_deep_dive
+    from scenarios.deep_dives import focused_dive, run_deep_dive
 
     if not llm_available():
         st.caption("OPENAI_API_KEY is not set.")
         return
 
-    # Whole body guarded: a deep dive must never red-screen the app. Any failure
-    # surfaces as a visible message and the brief/analysis already on screen
-    # stays intact. st.rerun() is OUTSIDE the guard — it works by raising, so
-    # catching it here would swallow the refresh.
     rerun = False
     try:
-        workbook_map = None
-        ori = st.session_state.wb_orientation
-        if ori and not ori.get("error"):
-            workbook_map = ori.get("map")
         files = sorted(st.session_state.uploaded_filenames)
         source_file = files[0] if files else None
+        ori = st.session_state.wb_orientation
+        orientation = ori if (ori and not ori.get("error")) else None
 
-        instruction = agent_dive_instruction(key, workbook_map, source_file)
-        reply = ""
-        if instruction:
-            turn_start = len(agent.messages)
-            try:
-                with st.spinner(f"Analyzing {label} (reading the workbook)…"):
-                    reply = agent.send(instruction)
-                if reply.startswith("⚠️"):
-                    del agent.messages[turn_start:]
-                else:
-                    # Transcript shows the chip label, not the task template.
-                    for m in reversed(agent.messages):
-                        if m.get("role") == "user" and m.get("content") == instruction:
-                            m["content"] = label
-                            break
-            except Exception as e:
-                del agent.messages[turn_start:]
-                st.caption(f"Agent dive failed ({e}); using the static analysis.")
-                reply = ""
-
-        if not reply or reply.startswith("⚠️"):
-            # Fallback: the legacy single-shot dive over SSOT data.
-            with st.spinner(f"Generating {label}…"):
-                result = run_deep_dive(key)
+        with st.spinner(f"Reading the {label} sheets…"):
+            result = focused_dive(key, UPLOAD_DIR / source_file, orientation) if source_file \
+                else {"error": "No workbook uploaded."}
             if "error" in result:
-                st.caption(result["error"])
-                return
+                # Last resort: the legacy single-shot dive over SSOT data.
+                result = run_deep_dive(key)
+
+        if "error" in result:
+            st.caption(result["error"])
+        else:
             agent.messages.append({"role": "user",      "content": label})
             agent.messages.append({"role": "assistant", "content": result["narrative"]})
-        rerun = True
+            rerun = True
     except Exception as e:
         import traceback as _tb
         st.error(f"Couldn't run {label}: {type(e).__name__}: {e}")

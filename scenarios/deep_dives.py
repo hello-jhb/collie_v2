@@ -452,6 +452,197 @@ def run_deep_dive(name: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Focused dive — read the topic's sheets WHOLE and summarize (comprehension)
+# ---------------------------------------------------------------------------
+# The deal brief reads the summary/inputs tabs; a focused dive reads the tabs
+# that actually hold the topic (the NOI/proforma for cash flow, the debt sheet
+# for capital structure, the returns/waterfall for returns) — picks them by
+# name, reads them WHOLE, and summarizes in ONE pass. Fast (1 read + 1 call) and
+# grounded in the real sheet, vs the old agentic re-read or time-series scrape.
+
+_TOPIC_READ: dict[str, dict[str, Any]] = {
+    "cash_flow": {
+        "title": "Cash Flow / NOI Trajectory",
+        "keywords": ("noi", "net operating income", "cash flow", "cashflow",
+                     "proforma", "pro forma", "p&l", "pnl", "operating statement",
+                     "operating income", "rollup", "roll-up"),
+        "roles": ("model",),
+        "focus": (
+            "Report the ANNUAL NOI trajectory. NOI is an ANNUAL figure — if a "
+            "sheet shows monthly or quarterly columns, use the annual total / "
+            "roll-up column, NEVER a single month (a single month would be ~1/12 "
+            "of the annual and is wrong). Give, as bullets with Sheet!Cell:\n"
+            "- Going-in / Year-1 ANNUAL NOI\n- Stabilized NOI and the year it stabilizes\n"
+            "- Exit / terminal NOI (12-mo forward at sale)\nThen 2-3 sentences on the "
+            "trajectory shape (flat / growth / dev ramp / value-add lift) and its drivers."
+        ),
+    },
+    "return_profile": {
+        "title": "Return Profile",
+        "keywords": ("irr", "return", "waterfall", "promote", "equity multiple",
+                     "moic", "yield", "distribution", "cash on cash", "cash-on-cash", "tracker"),
+        "roles": ("returns", "summary"),
+        "focus": (
+            "Report the return profile as bullets with Sheet!Cell: Levered IRR, "
+            "Unlevered IRR, Equity Multiple, Going-in Cap, Exit Cap, Exit Value, "
+            "Hold Period. If a sensitivity/scenario grid is present, add 1-2 bullets "
+            "on what swings the return most, with the deltas. Then 2-3 sentences on "
+            "where the return comes from (yield / cap compression / operational "
+            "uplift / development premium)."
+        ),
+    },
+    "capital_structure": {
+        "title": "Capital Structure",
+        "keywords": ("debt", "loan", "financing", "mortgage", "ltv", "ltc", "dscr",
+                     "interest", "libor", "sofr", "sources", "uses", "capitalization", "leverage"),
+        "roles": ("inputs", "returns", "model"),
+        "focus": (
+            "Report the capital stack as bullets with Sheet!Cell: Purchase Price / "
+            "Total Project Cost, Loan amount(s), Equity, LTV or LTC, Interest Rate "
+            "(if floating, express as spread + cap strike + max effective rate), "
+            "Loan Maturity, I/O period, DSCR, Debt Yield. Omit what's absent. Then "
+            "1-2 sentences on the stack's risk/return profile."
+        ),
+    },
+    "capex_plan": {
+        "title": "CapEx Plan",
+        "keywords": ("capex", "cap ex", "capital expenditure", "renovation", "hard cost",
+                     "soft cost", "construction", "ff&e", "os&e", "draw", "tenant improvement", "ti"),
+        "roles": ("model", "support"),
+        "focus": (
+            "Report the CapEx plan as bullets with Sheet!Cell: Total CapEx Budget, "
+            "Total Project Cost, per-key or per-SF basis where the sheet allows, and "
+            "a multi-year draw schedule if present. Then 2-3 sentences on what the "
+            "CapEx buys (deferred maintenance, unit reno, building systems, ground-up)."
+        ),
+    },
+    "key_risks": {
+        "title": "Key Risks",
+        "keywords": ("sensitivity", "scenario", "assumption", "risk", "recession",
+                     "downside", "stress", "exit", "growth"),
+        "roles": ("summary", "inputs", "returns"),
+        "focus": (
+            "Identify 3-5 risks SPECIFIC TO THIS DEAL, each tied to a specific "
+            "number, cell, or assumption you read (cite Sheet!Cell). FORBIDDEN: "
+            "generic boilerplate ('market risk') with no model-grounded basis. If "
+            "sensitivity/scenario tables exist, ground at least one risk in them "
+            "(e.g. exit-cap or rent-growth swings). Numbered list, max 250 words."
+        ),
+    },
+}
+
+
+# Tokens that mark a SECONDARY sheet — a side asset, a variant, an input/output
+# feeder, or a historical/backup — which should lose to the primary sheet on a
+# keyword tie (e.g. "Golf P&L" / "P&L Inputs" must not beat the main "P&L").
+_SECONDARY_TOKENS = {
+    "golf", "alt", "detail", "backup", "old", "bridge", "comp", "comps",
+    "historical", "historicals", "input", "inputs", "output", "outputs", "bs",
+}
+
+
+def _kw_hit(name_lower: str, tokens: set[str], kw: str) -> bool:
+    """Keyword match. Short keywords (<=3 chars, e.g. 'ti', 'noi', 'irr') must
+    match a WHOLE token, not a substring — otherwise 'ti' hits 'valuaTIon' and
+    'penetraTIon'. Multiword/punctuated keywords match as a substring."""
+    if len(kw) <= 3 and kw.isalnum():
+        return kw in tokens
+    return kw in name_lower
+
+
+def _select_topic_sheets(
+    topic: str, file_path, orientation: dict | None, max_sheets: int = 4,
+) -> list[str]:
+    """Pick the sheets that actually hold this topic: name-keyword match across
+    ALL sheets (skip-tier included — reading a sensitivity tab for risks is
+    desired), ranked by match strength (favouring concise primary sheets,
+    penalising secondary/variant ones) then orientation confidence. Falls back
+    to the topic's orientation roles, then to nothing."""
+    import re
+    spec = _TOPIC_READ.get(topic, {})
+    keywords = spec.get("keywords", ())
+    sheets_info = (orientation or {}).get("sheets", {}) or {}
+    names = list(sheets_info.keys())
+    if not names:
+        try:
+            import openpyxl
+            wb = openpyxl.load_workbook(file_path, read_only=True)
+            names = list(wb.sheetnames)
+            wb.close()
+        except Exception:
+            return []
+
+    scored: list[tuple[float, float, str]] = []
+    for n in names:
+        nl = n.lower()
+        tokens = {t for t in re.split(r"[^a-z0-9]+", nl) if t}
+        hits = sum(1 for k in keywords if _kw_hit(nl, tokens, k))
+        if not hits:
+            continue
+        clean_bonus = 1.0 if len(tokens) <= 2 else 0.0   # concise primary sheet
+        penalty = len(tokens & _SECONDARY_TOKENS)         # side/variant/feeder
+        conf = (sheets_info.get(n, {}) or {}).get("confidence", 0.0) or 0.0
+        scored.append((hits + clean_bonus - penalty, conf, n))
+    scored.sort(key=lambda x: (-x[0], -x[1]))
+    picked = [n for _, _, n in scored[:max_sheets]]
+
+    if not picked:  # fall back to the topic's orientation roles
+        rmap = (orientation or {}).get("map", {}) or {}
+        for role in spec.get("roles", ()):
+            picked.extend(rmap.get(role, []))
+        picked = picked[:max_sheets]
+    return picked
+
+
+_FOCUSED_SYSTEM = """\
+You are a real estate analyst writing ONE section of an IC memo. You are given
+the FULL CONTENT of the workbook tabs that hold this topic (each cell with its
+A1 reference). Read them the way an analyst does — headers, table structure, and
+units matter. Report ONLY what the cells support; cite Sheet!Cell for every
+figure; never invent a number. Mind units headers ("$ in 000s" means a cell of
+26995 is $27.0M — report the real magnitude). Bullets, NEVER markdown tables.
+"""
+
+
+def focused_dive(topic: str, file_path, orientation: dict | None) -> dict[str, Any]:
+    """Comprehension dive: read the topic's sheets whole, summarize in one pass."""
+    spec = _TOPIC_READ.get(topic)
+    if not spec:
+        return {"error": f"Unknown analysis: {topic}"}
+    if not llm_available():
+        return {"error": "OPENAI_API_KEY is not set."}
+
+    sheets = _select_topic_sheets(topic, file_path, orientation)
+    if not sheets:
+        return {"error": f"No sheets matched {spec['title']} in this workbook."}
+
+    from workbook_orientation import render_sheets_text
+    from scenarios._llm import client, MODEL
+    cells_block = render_sheets_text(Path(file_path), sheets, max_total_chars=26_000)
+    if not cells_block:
+        return {"error": f"Couldn't read the {spec['title']} sheets."}
+
+    user_msg = (
+        f"TOPIC: {spec['title']}\n\n{spec['focus']}\n\n"
+        f"WORKBOOK TABS ({', '.join(sheets)}):\n\n{cells_block}"
+    )
+    try:
+        resp = client.chat.completions.create(
+            model=MODEL, temperature=0.1,
+            messages=[
+                {"role": "system", "content": _FOCUSED_SYSTEM},
+                {"role": "user", "content": user_msg},
+            ],
+        )
+        text = (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        return {"error": f"{spec['title']} read failed: {type(e).__name__}: {e}"}
+    if not text:
+        return {"error": f"{spec['title']} returned nothing."}
+    return {"section": topic, "title": spec["title"], "narrative": text, "sheets_read": sheets}
+
+
+# ---------------------------------------------------------------------------
 # Agent-driven deep dives — the dive as a task for the tool-equipped agent
 # ---------------------------------------------------------------------------
 # Instead of a single-shot prompt over already-extracted SSOT data, the dive
