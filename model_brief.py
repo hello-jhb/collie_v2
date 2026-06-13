@@ -229,6 +229,91 @@ def build_model_brief(file_path: str | Path, use_cache: bool = True) -> dict[str
     return result
 
 
+_FINALIZE_SYSTEM = """\
+You are tightening a real estate deal brief so it asserts ONLY facts that were
+independently verified. You are given the draft brief plus three fact lists:
+VERIFIED (trustworthy), FLAGGED (a cross-check disagreed — surface but mark
+unverified), and OMITTED (could not be confirmed — must NOT appear).
+
+Rewrite the brief:
+- State VERIFIED numbers plainly, with their (Sheet!Cell).
+- For a FLAGGED number, you may mention it but append "(unverified — to confirm)"
+  and, if given, note the conflicting value.
+- NEVER state an OMITTED number, and never invent one to fill the gap; just
+  leave that point out.
+- Keep the section structure (Overview, Key Deal Stats, Debt, Returns, Model
+  Structure). Tight, executive, bullets — never markdown tables.
+
+Return ONLY the markdown brief, no preamble, no fences.
+"""
+
+
+def _fact_line(f: dict) -> str:
+    src = f"{f.get('sheet')}!{f.get('cell')}"
+    return f"- {f.get('field')}: {f.get('display', f.get('value'))} ({src})"
+
+
+def finalize_brief(brief: dict, scored: dict) -> dict[str, Any]:
+    """
+    Regenerate the brief narrative so it asserts only verified facts — the
+    "no wrong data" guarantee for what the user reads. `scored` is the
+    trust_engine.score_facts output.
+
+    Returns {"brief_md", "finalized": bool, "counts": {...}}. Falls back to the
+    original brief + a deterministic verified/flagged appendix when no LLM is
+    available or the call fails.
+    """
+    facts = scored.get("facts", []) or []
+    verified = [f for f in facts if f.get("trust", {}).get("verdict") == "show"]
+    flagged = [f for f in facts if f.get("trust", {}).get("verdict") == "flag"]
+    omitted = [f for f in facts if f.get("trust", {}).get("verdict") == "omit"]
+    counts = {"verified": len(verified), "flagged": len(flagged), "omitted": len(omitted)}
+
+    def _deterministic() -> str:
+        parts = [brief.get("brief_md", "")]
+        if flagged:
+            parts.append("**⚠ Flagged — verify before relying on these:**\n"
+                         + "\n".join(_fact_line(f) for f in flagged))
+        if omitted:
+            parts.append("_Omitted (could not be confirmed): "
+                         + ", ".join(f.get("field", "?") for f in omitted) + "._")
+        return "\n\n".join(p for p in parts if p)
+
+    if not verified and not flagged:
+        return {"brief_md": brief.get("brief_md", ""), "finalized": False, "counts": counts}
+    if not llm_available():
+        return {"brief_md": _deterministic(), "finalized": False, "counts": counts}
+
+    flagged_lines = []
+    for f in flagged:
+        better = (f.get("trust", {}).get("notes") or [""])[0]
+        flagged_lines.append(_fact_line(f) + (f"  [{better}]" if better else ""))
+
+    user_msg = (
+        "DRAFT BRIEF:\n" + brief.get("brief_md", "") + "\n\n"
+        "VERIFIED:\n" + ("\n".join(_fact_line(f) for f in verified) or "(none)") + "\n\n"
+        "FLAGGED:\n" + ("\n".join(flagged_lines) or "(none)") + "\n\n"
+        "OMITTED:\n" + (", ".join(f.get("field", "?") for f in omitted) or "(none)")
+    )
+    try:
+        resp = client.chat.completions.create(
+            model=MODEL, temperature=0.1,
+            messages=[
+                {"role": "system", "content": _FINALIZE_SYSTEM},
+                {"role": "user", "content": user_msg},
+            ],
+        )
+        md = (resp.choices[0].message.content or "").strip()
+        if md.startswith("```"):
+            md = md.split("```")[1]
+            if md.startswith("markdown"):
+                md = md[8:]
+        return {"brief_md": md.strip() or _deterministic(), "finalized": True, "counts": counts}
+    except Exception as e:
+        log.error("Brief finalize failed: %s", e)
+        return {"brief_md": _deterministic(), "finalized": False, "counts": counts}
+
+
 if __name__ == "__main__":
     import sys as _sys
     path = _sys.argv[1] if len(_sys.argv) > 1 else None

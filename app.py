@@ -203,6 +203,9 @@ _SESSION_DEFAULTS: dict = {
     # --- Trust engine (step 2): per-fact verdicts over the brief's facts ---
     "trust_scored":          None,
     "trust_scored_batch":    None,
+    # --- Finalized brief (step 4): narrative regenerated from verified facts ---
+    "finalized_brief":       None,
+    "finalized_brief_batch": None,
     # --- Deal Analyzer 3-column frontend (deal_review) ---
     # Findings folded into the Outcome (middle column) from the chat / deep-dives.
     # Shape: list of {"id": str, "title": str, "content": str}
@@ -280,6 +283,8 @@ def _wipe_uploads_and_reset_ssot() -> None:
     st.session_state.model_brief_batch = None
     st.session_state.trust_scored = None
     st.session_state.trust_scored_batch = None
+    st.session_state.finalized_brief = None
+    st.session_state.finalized_brief_batch = None
 
 
 def _activate_scenario(scenario_key: str) -> None:
@@ -840,7 +845,7 @@ def _render_process_inputs(files, batch_id, confirmed: bool) -> None:
     st.markdown("**Progress**")
     steps = [
         ("File uploaded",        bool(files)),
-        ("AAM verified",         confirmed),
+        ("Facts verified",       confirmed),
         ("Snapshot generated",   bool(st.session_state.snapshot_md)),
         (f"Analyses ({len(st.session_state.outcome_findings)})",
                                  bool(st.session_state.outcome_findings)),
@@ -861,12 +866,12 @@ def _render_process_actions(
         return
 
     if not confirmed:
-        st.caption("Verify the facts in the Outcome panel, then:")
-        if st.button("Proceed — confirm facts", type="primary", width="stretch",
-                     disabled=gate_edited is None):
-            _confirm_aam_and_ingest(
-                agent, _collect_verified(st.session_state.aam_records, gate_edited)
-            )
+        st.caption("Facts are auto-verified from the deal brief; flagged items "
+                   "are marked above. Review the detail checklist only if you want.")
+        if st.button("Run analysis →", type="primary", width="stretch"):
+            verified = _collect_verified(st.session_state.aam_records, gate_edited) \
+                if gate_edited is not None else {}
+            _confirm_aam_and_ingest(agent, verified)
         return
 
     if not analysis_req:
@@ -893,7 +898,11 @@ def _render_outcome_column(agent: AgentSession, batch_id, confirmed: bool, analy
 
     if not confirmed:
         _render_model_brief(batch_id)
-        return _render_aam_appendix(batch_id)
+        # The brief + fact check above is the product. The 22-field checklist is
+        # demoted to an optional detail review — its body still executes (so the
+        # Run-analysis button has the records to confirm), it's just collapsed.
+        with st.expander("Review the 22-field detail checklist (optional)", expanded=False):
+            return _render_aam_appendix(batch_id)
 
     _render_aam_summary()
 
@@ -1065,6 +1074,11 @@ def _generate_report() -> None:
     name_by_id = {m["metric_id"]: m["metric_name"] for m in load_metric_catalog()}
 
     parts: list[str] = []
+    # Lead with the comprehension brief (the deal read) when present.
+    fin = st.session_state.get("finalized_brief") or {}
+    brief_md = fin.get("brief_md") or (st.session_state.get("model_brief") or {}).get("brief_md")
+    if brief_md:
+        parts.append("## Deal Brief\n" + brief_md)
     fact_lines = []
     for mid in aam.AAM_METRIC_IDS:
         rec = bm.get(name_by_id.get(mid, ""))
@@ -1569,19 +1583,43 @@ def _render_model_brief(batch_id) -> None:
                        "The audit appendix below still works without it.")
         return
     brief = _ensure_model_brief(batch_id)
-    with st.container(border=True):
-        st.markdown("#### Model Brief — comprehension read")
-        if brief.get("error"):
+    if brief.get("error"):
+        with st.container(border=True):
+            st.markdown("#### Deal Brief")
             st.caption(f"Couldn't generate the brief: {brief['error']}")
-            return
-        st.caption(
-            "Read from " + ", ".join(brief.get("sheets_read", []) or ["—"])
-        )
-        st.markdown(brief.get("brief_md", "_(empty)_"))
+        return
 
+    # Verify the brief's facts, then regenerate the narrative so it asserts only
+    # verified facts ("no wrong data"). Both cached per batch.
     scored = _ensure_trust_scored(batch_id, brief)
+    final_md = brief.get("brief_md", "")
+    if scored is not None:
+        finalized = _ensure_finalized_brief(batch_id, brief, scored)
+        final_md = finalized.get("brief_md") or final_md
+
+    with st.container(border=True):
+        st.markdown("#### Deal Brief")
+        st.caption("Read from " + ", ".join(brief.get("sheets_read", []) or ["—"]))
+        st.markdown(final_md or "_(empty)_")
+
     if scored is not None:
         _render_trust_panel(scored)
+
+
+def _ensure_finalized_brief(batch_id, brief: dict, scored: dict) -> dict:
+    """Regenerate the brief narrative from verified facts once per batch."""
+    if (st.session_state.get("finalized_brief_batch") == batch_id
+            and st.session_state.get("finalized_brief")):
+        return st.session_state.finalized_brief
+    from model_brief import finalize_brief
+    try:
+        result = finalize_brief(brief, scored)
+    except Exception as e:
+        result = {"brief_md": brief.get("brief_md", ""), "finalized": False,
+                  "counts": {}, "error": str(e)}
+    st.session_state.finalized_brief = result
+    st.session_state.finalized_brief_batch = batch_id
+    return result
 
 
 def _ensure_trust_scored(batch_id, brief: dict):
