@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 import ssot
-from scenarios._llm import complete, llm_available
+from scenarios._llm import complete, llm_available, log
 from scenarios.profiles import filter_layer_metrics
 from flexible_extractor import extract_time_series_rows
 from knowledge_store import build_runtime_knowledge_block
@@ -55,11 +55,21 @@ You have these inputs:
   3. LEGACY CATALOG FACTS + PASS 2 INFERRED FIELDS: secondary. Note inferred
      fields as "(inferred)".
   4. TIME SERIES: multi-year NOI / revenue / cash-flow trajectory.
+  5. AUTHORITATIVE SHEET CONTENT: the model's summary / one-pager / inputs
+     sheets rendered IN FULL (each cell with its A1 ref). This is how you see
+     the deal the way the analyst does — the stated strategy, basis build-up,
+     portfolio composition, threshold notes, and anything the checklist can't
+     capture. Use it for the STORY and qualitative framing.
 
 CITATION RULES (NON-NEGOTIABLE):
 - VERIFIED / CANDIDATE_POOL / traced metrics: cite with cell ref, e.g.
   "$192M (General Information!C11)".
 - SUSPICIOUS: never cite the value. MISSING: omit. Inferred: mark "(inferred)".
+- AUTHORITATIVE SHEET CONTENT is supporting context: you may cite a cell from
+  it (Sheet!Cell) for qualitative facts and color, but when a number there
+  disagrees with a bounded metric, THE BOUNDED METRIC GOVERNS — the human
+  verified it. Never use sheet content to overrule or re-derive checklist
+  values. Mind units headers like "$ in 000s" when reading raw cells.
 - Never invent a number. If you don't have it, leave it out.
 
 OUTPUT — write EXACTLY one section, nothing before or after it:
@@ -331,6 +341,8 @@ def generate_deal_review() -> dict[str, Any]:
     # Time series from the source file (NOI/revenue/cash flow trajectory)
     source_file = underwriting.get("source_file")
     time_series_block = ""
+    sheets_block = ""
+    sheets_read: list[str] = []
     if source_file:
         file_path = UPLOAD_DIR / source_file
         if file_path.exists():
@@ -342,6 +354,16 @@ def generate_deal_review() -> dict[str, Any]:
                 time_series_block = _format_time_series_block(ts)
             except Exception as e:
                 time_series_block = f"(time series extraction failed: {e})"
+
+            # Whole-sheet context: the analyst's reading stack (one-pager /
+            # inputs / secondary summaries) rendered in full, so the narrative
+            # can see the deal story — not just extracted metrics. Best-effort.
+            try:
+                from workbook_orientation import analyst_reading_stack
+                sheets_read, sheets_block = analyst_reading_stack(file_path)
+            except Exception as e:
+                sheets_block = ""
+                log.error("Snapshot sheet-context read failed for %s: %s", source_file, e)
         else:
             time_series_block = f"(source file not found in uploads: {source_file})"
 
@@ -388,6 +410,12 @@ with explicit provenance. Status-based citation rules apply (see system prompt).
 ===== TIME SERIES (multi-year projections — use for NOI / cash flow trajectory) =====
 {time_series_block}
 
+===== AUTHORITATIVE SHEET CONTENT (full pages: {', '.join(sheets_read) if sheets_read else 'unavailable'}) =====
+Use for the deal STORY, strategy, and qualitative context. Bounded metrics
+above govern on any numeric disagreement. Mind units headers ("$ in 000s").
+
+{sheets_block or '(sheet content unavailable)'}
+
 ===== ACTIVE BUSINESS-PLAN KNOWLEDGE PATTERNS (interpretive only; do not create facts) =====
 {business_plan_patterns or '(no active business-plan patterns)'}
 
@@ -418,6 +446,7 @@ references where facts are used. NEVER cite SUSPICIOUS or MISSING values as fact
             "catalog_metric_count": len(catalog_metrics),
             "pass2_field_count": len(raw_insights.get("found", {}) if raw_insights else {}),
             "time_series_rows": len(time_series_block.splitlines()) if time_series_block else 0,
+            "sheets_read_whole": sheets_read,
         },
     }
 

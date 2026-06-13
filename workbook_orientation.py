@@ -526,3 +526,67 @@ def orientation_tier_map(orientation: dict[str, Any] | None) -> dict[str, int] |
         else:
             tiers[name] = ROLE_TIER.get(info.get("role"), 6)
     return tiers
+
+
+def select_read_sheets(
+    tier_map: dict[str, int],
+    max_sheets: int = 8,
+    quotas: tuple[tuple[int, int], ...] = ((1, 4), (2, 2), (3, 2)),
+) -> list[str]:
+    """
+    Pick the sheets to read WHOLE — the analyst's short stack: a few summary
+    sheets, the inputs sheet(s), a secondary summary or two. Within each tier
+    the NAME tier breaks ties (an explicit "One Pager" / "Executive Summary"
+    name beats template tabs that content-classified into the same tier),
+    mirroring the resolver's own tiebreak. Backfills to max_sheets from the
+    remaining whitelisted sheets when a tier is thin.
+    """
+    by_name_rank = lambda n: (sheet_priority_tier(n), n)
+    picked: list[str] = []
+    for tier, quota in quotas:
+        group = sorted((n for n, t in tier_map.items() if t == tier), key=by_name_rank)
+        picked.extend(group[:quota])
+    if len(picked) < max_sheets:
+        rest = sorted(
+            (n for n, t in tier_map.items() if t != 99 and n not in picked),
+            key=lambda n: (tier_map[n], *by_name_rank(n)),
+        )
+        picked.extend(rest[: max_sheets - len(picked)])
+    return picked[:max_sheets]
+
+
+def analyst_reading_stack(
+    file_path: str | Path,
+    max_sheets: int = 5,
+    max_total_chars: int = 22_000,
+) -> tuple[list[str], str]:
+    """
+    One-call helper: orient the workbook, pick the analyst's reading stack,
+    and render those sheets whole. Used by narrative generation (Snapshot) to
+    see the actual pages an analyst reads — basis build-ups, threshold notes,
+    deal story — not just extracted metrics.
+
+    Falls back to name-based tiers when orientation fails. Returns
+    ([sheet names], rendered_text); ("", []) means nothing could be read.
+    No hardcode marks (no formula pass) — this is reading context, not
+    input-vs-derived analysis — which keeps it fast.
+    """
+    file_path = Path(file_path)
+    tier_map = orientation_tier_map(orient_workbook(file_path))
+    if tier_map is None:
+        try:
+            import openpyxl
+            wb = openpyxl.load_workbook(file_path, read_only=True)
+            tier_map = {n: sheet_priority_tier(n) for n in wb.sheetnames}
+            wb.close()
+        except Exception:
+            return [], ""
+    sheets = select_read_sheets(tier_map, max_sheets=max_sheets)
+    if not sheets:
+        return [], ""
+    text = render_sheets_text(
+        file_path, sheets, formula_cells=None,
+        max_chars_per_sheet=max(4_000, max_total_chars // max(len(sheets), 1)),
+        max_total_chars=max_total_chars,
+    )
+    return sheets, text

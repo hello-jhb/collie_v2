@@ -377,8 +377,8 @@ def _focused_gap_fill(
     # label/value pair list. Every claimed hit is still grounded against the
     # real cell and re-validated through resolve_metric below — comprehension
     # got better; the trust machinery is unchanged.
-    from workbook_orientation import render_sheets_text
-    stage1_sheets = _select_read_sheets(stage1_tiers)
+    from workbook_orientation import render_sheets_text, select_read_sheets
+    stage1_sheets = select_read_sheets(stage1_tiers, max_sheets=_MAX_READ_SHEETS)
     cells_block = ""
     if stage1_sheets:
         try:
@@ -504,29 +504,6 @@ Return ONLY JSON, no prose, no code fences:
   ...
 }
 """
-
-
-def _select_read_sheets(stage1_tiers: dict[str, int]) -> list[str]:
-    """
-    Pick the sheets to read WHOLE for the focused GPT pass — the analyst's
-    short stack: a few summary sheets, the inputs sheet(s), one more. Within
-    each tier the NAME tier breaks ties (an explicit "One Pager" / "Executive
-    Summary" name beats template tabs that content-classified into the same
-    tier), mirroring the resolver's own tiebreak. Backfills to _MAX_READ_SHEETS
-    from the remaining whitelisted sheets when a tier is thin.
-    """
-    by_name_rank = lambda n: (sheet_priority_tier(n), n)
-    picked: list[str] = []
-    for tier, quota in ((1, 4), (2, 2), (3, 2)):
-        group = sorted((n for n, t in stage1_tiers.items() if t == tier), key=by_name_rank)
-        picked.extend(group[:quota])
-    if len(picked) < _MAX_READ_SHEETS:
-        rest = sorted(
-            (n for n, t in stage1_tiers.items() if t != 99 and n not in picked),
-            key=lambda n: (stage1_tiers[n], *by_name_rank(n)),
-        )
-        picked.extend(rest[: _MAX_READ_SHEETS - len(picked)])
-    return picked[:_MAX_READ_SHEETS]
 
 
 def _pairs_block(pairs: list[dict], stage1_tiers: dict[str, int] | None) -> str:
