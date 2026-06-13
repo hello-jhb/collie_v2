@@ -1163,47 +1163,57 @@ def _run_deep_dive(agent: AgentSession, key: str, label: str) -> None:
         st.caption("OPENAI_API_KEY is not set.")
         return
 
-    workbook_map = None
-    ori = st.session_state.wb_orientation
-    if ori and not ori.get("error"):
-        workbook_map = ori.get("map")
-    files = sorted(st.session_state.uploaded_filenames)
-    source_file = files[0] if files else None
+    # Whole body guarded: a deep dive must never red-screen the app. Any failure
+    # surfaces as a visible message and the brief/analysis already on screen
+    # stays intact. st.rerun() is OUTSIDE the guard — it works by raising, so
+    # catching it here would swallow the refresh.
+    rerun = False
+    try:
+        workbook_map = None
+        ori = st.session_state.wb_orientation
+        if ori and not ori.get("error"):
+            workbook_map = ori.get("map")
+        files = sorted(st.session_state.uploaded_filenames)
+        source_file = files[0] if files else None
 
-    instruction = agent_dive_instruction(key, workbook_map, source_file)
-    reply = ""
-    if instruction:
-        turn_start = len(agent.messages)
-        try:
-            with st.spinner(f"Analyzing {label} (reading the workbook)…"):
-                reply = agent.send(instruction)
-            if reply.startswith("⚠️"):
-                # Failed turn (no key / max iterations) — drop its messages so
-                # the transcript stays clean for the static fallback below.
+        instruction = agent_dive_instruction(key, workbook_map, source_file)
+        reply = ""
+        if instruction:
+            turn_start = len(agent.messages)
+            try:
+                with st.spinner(f"Analyzing {label} (reading the workbook)…"):
+                    reply = agent.send(instruction)
+                if reply.startswith("⚠️"):
+                    del agent.messages[turn_start:]
+                else:
+                    # Transcript shows the chip label, not the task template.
+                    for m in reversed(agent.messages):
+                        if m.get("role") == "user" and m.get("content") == instruction:
+                            m["content"] = label
+                            break
+            except Exception as e:
                 del agent.messages[turn_start:]
-            else:
-                # The transcript should show the chip label, not the task
-                # template. The model already consumed the instruction for THIS
-                # turn; later turns only need the label + the analysis.
-                for m in reversed(agent.messages):
-                    if m.get("role") == "user" and m.get("content") == instruction:
-                        m["content"] = label
-                        break
-        except Exception as e:
-            del agent.messages[turn_start:]
-            st.caption(f"Agent dive failed ({e}); using the static analysis.")
-            reply = ""
+                st.caption(f"Agent dive failed ({e}); using the static analysis.")
+                reply = ""
 
-    if not reply or reply.startswith("⚠️"):
-        # Fallback: the legacy single-shot dive over SSOT data.
-        with st.spinner(f"Generating {label}…"):
-            result = run_deep_dive(key)
-        if "error" in result:
-            st.caption(result["error"])
-            return
-        agent.messages.append({"role": "user",      "content": label})
-        agent.messages.append({"role": "assistant", "content": result["narrative"]})
-    st.rerun()
+        if not reply or reply.startswith("⚠️"):
+            # Fallback: the legacy single-shot dive over SSOT data.
+            with st.spinner(f"Generating {label}…"):
+                result = run_deep_dive(key)
+            if "error" in result:
+                st.caption(result["error"])
+                return
+            agent.messages.append({"role": "user",      "content": label})
+            agent.messages.append({"role": "assistant", "content": result["narrative"]})
+        rerun = True
+    except Exception as e:
+        import traceback as _tb
+        st.error(f"Couldn't run {label}: {type(e).__name__}: {e}")
+        with st.expander("Details"):
+            st.code("".join(_tb.format_exc())[-1500:])
+
+    if rerun:
+        st.rerun()
 
 
 def _handle_chat_input(agent: AgentSession, user_input: str | None) -> None:
