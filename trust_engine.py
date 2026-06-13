@@ -166,6 +166,41 @@ def _read_cells(file_path: Path, needed: dict[str, set[str]]) -> dict[tuple[str,
     return out
 
 
+def _scan_sheet_values(file_path: Path, sheets: set[str]) -> dict[str, list[tuple[str, Any]]]:
+    """For each sheet, collect (coordinate, value) for every numeric cell — used
+    to recover a fact whose VALUE is right but whose CITED CELL is off (gpt-4o
+    cites a neighbouring cell). Bounded, read-only, values_only."""
+    import openpyxl
+    from openpyxl.utils import get_column_letter
+    out: dict[str, list[tuple[str, Any]]] = {s: [] for s in sheets}
+    if not sheets:
+        return out
+    try:
+        wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
+    except Exception:
+        return out
+    for sheet in sheets:
+        if sheet not in wb.sheetnames:
+            continue
+        try:
+            ws = wb[sheet]
+            for r, row in enumerate(
+                ws.iter_rows(min_row=1, max_row=_GROUND_MAX_ROW,
+                             min_col=1, max_col=_GROUND_MAX_COL, values_only=True),
+                start=1,
+            ):
+                for ci, v in enumerate(row, start=1):
+                    if isinstance(v, (int, float)) and not isinstance(v, bool):
+                        out[sheet].append((f"{get_column_letter(ci)}{r}", v))
+        except Exception:
+            continue
+    try:
+        wb.close()
+    except Exception:
+        pass
+    return out
+
+
 def _grounds(claimed, actual) -> bool:
     """Does the actual cell value support the claimed value? Numbers match within
     rounding, or off by a clean scale (x1000) / percent representation (x100);
@@ -333,21 +368,47 @@ def score_facts(
         except Exception as e:
             log.error("Challenge stage skipped: %s", e)
 
+    # Exact-cell grounding first; collect sheets of ungrounded NUMERIC facts so
+    # we can recover a right-value/wrong-cell case by scanning the cited sheet.
+    exact: dict[int, tuple[bool, Any]] = {}
+    fallback_sheets: set[str] = set()
+    for i, f in enumerate(facts):
+        s, c = f.get("sheet"), f.get("cell")
+        actual = cells.get((s, c)) if (s and c) else None
+        g = bool(s and c) and _grounds(f.get("value", f.get("display")), actual)
+        exact[i] = (g, actual)
+        if not g and s:
+            num, ok = parse_numeric_value(f.get("display", f.get("value")))
+            if ok and isinstance(num, (int, float)):
+                fallback_sheets.add(s)
+    scan = _scan_sheet_values(file_path, fallback_sheets)
+
     summary = {"high": 0, "medium": 0, "flagged": 0, "omitted": 0}
     for i, f in enumerate(facts):
         s, c = f.get("sheet"), f.get("cell")
         composed = bool(f.get("composed_from"))
-        actual = cells.get((s, c)) if (s and c) else None
+        grounded, actual = exact[i]
+        claimed_disp = f.get("display", f.get("value"))
 
-        grounded = bool(s and c) and _grounds(f.get("value", f.get("display")), actual)
-        # Composed figures (per-key, sums) often cite a derived cell; if it
-        # grounds, great — otherwise treat as composed (soft), not fabricated.
+        # Recover a right-value/wrong-cell fact: if the exact cell failed but the
+        # claimed value appears elsewhere on the SAME (authoritative) sheet,
+        # ground it there and correct the provenance.
+        corrected_cell = None
+        if not grounded and s in scan:
+            claimed = f.get("display", f.get("value"))
+            for coord, v in scan[s]:
+                if _grounds(claimed, v):
+                    grounded, corrected_cell = True, coord
+                    break
+
         authoritative, role = _authoritative(s, orientation)
         rec = recon.get(i)  # (passed, name) or None
         ch = challenge.get(i, {})
         ch_status = ch.get("status")
 
         notes: list[str] = []
+        if corrected_cell:
+            notes.append(f"source cell corrected to {s}!{corrected_cell} (brief cited {c})")
         if rec:
             notes.append(("reconciles: " if rec[0] else "RECONCILE FAIL: ") + rec[1])
         if ch_status == "disagree" and ch.get("better"):
@@ -361,8 +422,14 @@ def score_facts(
         positive = (rec and rec[0] is True) or (ch_status == "agree")
 
         if not grounded and not composed:
-            verdict, conf = "omit", "low"
-            notes.insert(0, f"not grounded: {s}!{c} does not contain {f.get('display', f.get('value'))}")
+            if ch_status == "agree":
+                # Value corroborated by the independent challenge read even though
+                # the exact cell couldn't be confirmed — show, but mark it.
+                verdict, conf = "show", "medium"
+                notes.insert(0, f"cell {s}!{c} unconfirmed; challenge corroborates the value")
+            else:
+                verdict, conf = "omit", "low"
+                notes.insert(0, f"not grounded: {s}!{c} does not contain {claimed_disp}")
         elif conflict:
             verdict, conf = "flag", "low"
         elif grounded and authoritative and positive:
@@ -373,9 +440,13 @@ def score_facts(
         else:
             verdict, conf = "show", "medium"
 
+        # Adopt the corrected cell as the fact's provenance (display + persist).
+        if corrected_cell:
+            f["cell"] = corrected_cell
         f["trust"] = {
             "grounded": grounded,
             "actual_cell_value": actual,
+            "corrected_cell": corrected_cell,
             "authoritative": authoritative,
             "sheet_role": role,
             "reconciles": (rec[0] if rec else None),
