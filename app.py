@@ -200,6 +200,9 @@ _SESSION_DEFAULTS: dict = {
     # build_model_brief result for the current batch, and its batch id.
     "model_brief":           None,
     "model_brief_batch":     None,
+    # --- Trust engine (step 2): per-fact verdicts over the brief's facts ---
+    "trust_scored":          None,
+    "trust_scored_batch":    None,
     # --- Deal Analyzer 3-column frontend (deal_review) ---
     # Findings folded into the Outcome (middle column) from the chat / deep-dives.
     # Shape: list of {"id": str, "title": str, "content": str}
@@ -275,6 +278,8 @@ def _wipe_uploads_and_reset_ssot() -> None:
     st.session_state.wb_orientation_batch = None
     st.session_state.model_brief = None
     st.session_state.model_brief_batch = None
+    st.session_state.trust_scored = None
+    st.session_state.trust_scored_batch = None
 
 
 def _activate_scenario(scenario_key: str) -> None:
@@ -1571,9 +1576,59 @@ def _render_model_brief(batch_id) -> None:
             return
         st.caption(
             "Read from " + ", ".join(brief.get("sheets_read", []) or ["—"])
-            + " · not yet verified (trust engine is the next step)."
         )
         st.markdown(brief.get("brief_md", "_(empty)_"))
+
+    scored = _ensure_trust_scored(batch_id, brief)
+    if scored is not None:
+        _render_trust_panel(scored)
+
+
+def _ensure_trust_scored(batch_id, brief: dict):
+    """Run the trust engine over the brief's facts once per batch (cached in
+    session). Returns the scored result, or None when there's nothing to score."""
+    if brief.get("error") or not brief.get("facts"):
+        return None
+    if st.session_state.get("trust_scored_batch") == batch_id and st.session_state.get("trust_scored"):
+        return st.session_state.trust_scored
+    primary = sorted(st.session_state.uploaded_filenames)[0]
+    with st.spinner("Verifying facts (grounding · reconcile · challenge)…"):
+        from trust_engine import score_facts
+        try:
+            scored = score_facts(brief, UPLOAD_DIR / primary, st.session_state.wb_orientation)
+        except Exception as e:
+            scored = {"error": f"{type(e).__name__}: {e}", "facts": [], "summary": {}}
+    st.session_state.trust_scored = scored
+    st.session_state.trust_scored_batch = batch_id
+    return scored
+
+
+_VERDICT_MARK = {"show": "✓", "flag": "⚠", "omit": "✕"}
+
+
+def _render_trust_panel(scored: dict) -> None:
+    """Show the per-fact verdicts: what the engine would trust without a human,
+    what it flags, and what it omits — the confidence score that replaces the gate."""
+    with st.container(border=True):
+        if scored.get("error"):
+            st.caption(f"Fact check unavailable: {scored['error']}")
+            return
+        s = scored.get("summary", {})
+        st.markdown("#### Fact check — what the engine trusts")
+        st.caption(
+            f"{s.get('high', 0)} high · {s.get('medium', 0)} medium · "
+            f"{s.get('flagged', 0)} flagged · {s.get('omitted', 0)} omitted. "
+            "High-confidence facts need no human; only flagged/omitted want a look."
+        )
+        for f in scored.get("facts", []):
+            t = f.get("trust", {})
+            v = t.get("verdict", "show")
+            mark = _VERDICT_MARK.get(v, "·")
+            src = f"{f.get('sheet')}!{f.get('cell')}"
+            line = f"{mark} **{f.get('field')}**: {f.get('display', f.get('value'))}  ({src})"
+            if t.get("notes"):
+                line += f" — {'; '.join(t['notes'])[:160]}"
+            st.markdown(line)
 
 
 def _render_aam_appendix(batch_id) -> "pd.DataFrame":
