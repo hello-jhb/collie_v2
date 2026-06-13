@@ -1157,7 +1157,14 @@ def _run_deep_dive(agent: AgentSession, key: str, label: str) -> None:
     agentic re-read. Lands in the chat transcript where it can fold to the
     Outcome. st.rerun() is OUTSIDE the guard (it works by raising)."""
     from scenarios._llm import llm_available
-    from scenarios.deep_dives import focused_dive, run_deep_dive
+    # Resolve via getattr, not a fixed `from … import focused_dive`: Streamlit
+    # Cloud caches imported submodules across hot-reloads, so right after a push
+    # `scenarios.deep_dives` can be a STALE cached module missing a newly-added
+    # symbol — a plain import then ImportError-crashes the app. getattr lets us
+    # degrade to the legacy dive instead. (A full app reboot clears the cache.)
+    from scenarios import deep_dives as _dd
+    focused_dive = getattr(_dd, "focused_dive", None)
+    run_deep_dive = getattr(_dd, "run_deep_dive", None)
 
     if not llm_available():
         st.caption("OPENAI_API_KEY is not set.")
@@ -1171,9 +1178,11 @@ def _run_deep_dive(agent: AgentSession, key: str, label: str) -> None:
         orientation = ori if (ori and not ori.get("error")) else None
 
         with st.spinner(f"Reading the {label} sheets…"):
-            result = focused_dive(key, UPLOAD_DIR / source_file, orientation) if source_file \
-                else {"error": "No workbook uploaded."}
-            if "error" in result:
+            if focused_dive and source_file:
+                result = focused_dive(key, UPLOAD_DIR / source_file, orientation)
+            else:
+                result = {"error": "No workbook uploaded."} if not source_file else {"error": "stale"}
+            if "error" in result and run_deep_dive:
                 # Last resort: the legacy single-shot dive over SSOT data.
                 result = run_deep_dive(key)
 
