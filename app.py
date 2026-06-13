@@ -928,12 +928,15 @@ def _render_outcome_column(agent: AgentSession, batch_id, confirmed: bool, analy
         and st.session_state.finalized_brief
     )
     if brief_path:
+        mb = st.session_state.model_brief or {}
         with st.container(border=True):
             st.markdown("#### Deal Brief")
             fin = st.session_state.finalized_brief or {}
-            mb = st.session_state.model_brief or {}
             st.markdown(fin.get("brief_md") or mb.get("brief_md", "_(empty)_"))
         if st.session_state.trust_scored:
+            # Initial View (Layer 3) stays the hero post-confirm too. The view is
+            # cached per batch, so this reuses the pre-confirm computation.
+            _render_investment_view(batch_id, mb, st.session_state.trust_scored)
             _render_trust_panel(st.session_state.trust_scored)
     else:
         _render_aam_summary()
