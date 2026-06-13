@@ -866,14 +866,22 @@ def _render_process_actions(
         return
 
     if not confirmed:
-        st.caption("Facts are auto-verified from the deal brief; flagged items "
-                   "are marked above. Review the detail checklist only if you want.")
-        if st.button("Run analysis →", type="primary", width="stretch"):
-            verified = _collect_verified(st.session_state.aam_records, gate_edited) \
-                if gate_edited is not None else {}
-            _confirm_aam_and_ingest(agent, verified)
+        if _brief_available(batch_id):
+            st.caption("The verified Deal Brief above carries straight through — "
+                       "running analysis makes it the record (no re-extraction).")
+            if st.button("Run analysis →", type="primary", width="stretch"):
+                _run_analysis_from_brief(agent, batch_id)
+        else:
+            st.caption("No Deal Brief (set OPENAI_API_KEY for the comprehension "
+                       "read). Facts come from the detail checklist below.")
+            if st.button("Run analysis →", type="primary", width="stretch"):
+                verified = _collect_verified(st.session_state.aam_records, gate_edited) \
+                    if gate_edited is not None else {}
+                _confirm_aam_and_ingest(agent, verified)
         return
 
+    # Post-confirm. Brief path advances straight to analysis (no second click);
+    # legacy path keeps the explicit Snapshot step.
     if not analysis_req:
         if st.button("Run analysis (Snapshot)", type="primary", width="stretch"):
             st.session_state.aam_analysis_requested.add(batch_id)
@@ -900,18 +908,32 @@ def _render_outcome_column(agent: AgentSession, batch_id, confirmed: bool, analy
         _render_model_brief(batch_id)
         # The brief + fact check above is the product. The 22-field checklist is
         # demoted to an optional detail review — its body still executes (so the
-        # Run-analysis button has the records to confirm), it's just collapsed.
+        # no-brief Run-analysis path has records to confirm), it's just collapsed.
         with st.expander("Review the 22-field detail checklist (optional)", expanded=False):
             return _render_aam_appendix(batch_id)
 
-    _render_aam_summary()
-
-    if analysis_req:
-        _ensure_snapshot_generated(agent)
-    if st.session_state.snapshot_md:
+    # Post-confirm. Brief path: the Deal Brief stays the hero — the same verified
+    # read carries through, no swap to a separately-extracted AAM summary.
+    brief_path = bool(
+        st.session_state.finalized_brief_batch == batch_id
+        and st.session_state.finalized_brief
+    )
+    if brief_path:
         with st.container(border=True):
-            st.markdown("#### Snapshot")
-            st.markdown(st.session_state.snapshot_md)
+            st.markdown("#### Deal Brief")
+            fin = st.session_state.finalized_brief or {}
+            mb = st.session_state.model_brief or {}
+            st.markdown(fin.get("brief_md") or mb.get("brief_md", "_(empty)_"))
+        if st.session_state.trust_scored:
+            _render_trust_panel(st.session_state.trust_scored)
+    else:
+        _render_aam_summary()
+        if analysis_req:
+            _ensure_snapshot_generated(agent)
+        if st.session_state.snapshot_md:
+            with st.container(border=True):
+                st.markdown("#### Snapshot")
+                st.markdown(st.session_state.snapshot_md)
 
     for f in st.session_state.outcome_findings:
         with st.container(border=True):
@@ -1056,7 +1078,10 @@ def _render_chat_column(agent: AgentSession, suggestions: bool = False) -> None:
         st.rerun()
 
     st.divider()
-    can_report = bool(st.session_state.snapshot_md or st.session_state.outcome_findings)
+    can_report = bool(
+        st.session_state.finalized_brief or st.session_state.snapshot_md
+        or st.session_state.outcome_findings
+    )
     if st.button("Generate Report → SSOT", width="stretch", disabled=not can_report,
                  help="Memorialize the Outcome into a report and save it as the SSOT."):
         _generate_report()
@@ -1762,10 +1787,99 @@ def _fill_aam_blanks(records: dict) -> None:
     st.rerun()
 
 
+def _brief_available(batch_id) -> bool:
+    """True when a verified Deal Brief exists for this batch — the comprehension
+    path is live (LLM present, brief built, facts scored)."""
+    mb = st.session_state.model_brief
+    return bool(
+        st.session_state.model_brief_batch == batch_id
+        and mb and not mb.get("error") and (mb.get("facts") or [])
+        and st.session_state.trust_scored_batch == batch_id
+        and st.session_state.trust_scored
+    )
+
+
+def _persist_brief_to_ssot(batch_id) -> None:
+    """Persist the verified Deal Brief facts as the underwriting SSOT — the brief
+    IS the extraction. No separate bounded re-extraction, so the snapshot, deep
+    dives, and report all read ONE fact set (the brief's) instead of a competing
+    code/catalog set. Omitted facts are dropped; flagged facts persist as
+    'suspicious' so downstream knows not to lean on them."""
+    from metric_resolver import parse_numeric_value
+    files = sorted(st.session_state.uploaded_filenames)
+    brief = st.session_state.model_brief or {}
+    scored = st.session_state.trust_scored or {}
+    finalized = st.session_state.finalized_brief or {}
+    facts = scored.get("facts") or brief.get("facts") or []
+
+    metrics: list[dict] = []
+    bounded: dict[str, dict] = {}
+    for f in facts:
+        verdict = f.get("trust", {}).get("verdict", "show")
+        field = f.get("field")
+        if verdict == "omit" or not field:
+            continue
+        num, ok = parse_numeric_value(f.get("display", f.get("value")))
+        value = num if ok else f.get("value")
+        status = "verified" if verdict == "show" else "suspicious"
+        sheet, cell = f.get("sheet"), f.get("cell")
+        metrics.append({
+            "metric_name": field, "value": value,
+            "sheet": sheet, "value_cell": cell, "confidence": status,
+        })
+        bounded[field] = {
+            "metric_name": field,
+            "raw_value": f.get("value"),
+            "normalized_value": value,
+            "display_value": f.get("display", str(value)),
+            "source_sheet": sheet, "source_cell": cell,
+            "status": status,
+            "validation_notes": f.get("trust", {}).get("notes", []),
+            "from_brief": True,
+        }
+
+    ssot.write_layer(
+        layer="underwriting",
+        metrics=metrics,
+        source_file=files[0] if files else "brief",
+        bounded_metrics=bounded,
+        extraction_metadata={"source": "model_brief", "brief_version": brief.get("version")},
+    )
+    ident = brief.get("identity", {}) or {}
+    try:
+        ssot.update_identity({
+            "name": ident.get("asset"),
+            "property_type": ident.get("property_type"),
+            "location": ident.get("location"),
+            "sf_or_units": ident.get("size"),
+        })
+    except Exception:
+        pass
+    try:
+        s = ssot.load_ssot()
+        s.setdefault("layers", {}).setdefault("underwriting", {})["deal_brief"] = (
+            finalized.get("brief_md") or brief.get("brief_md")
+        )
+        ssot.save_ssot(s)
+    except Exception:
+        pass
+
+
+def _run_analysis_from_brief(agent: AgentSession, batch_id) -> None:
+    """Brief path: carry the verified brief into the SSOT as the source of truth
+    and unlock deep dives + report. No re-extraction, no separate snapshot — the
+    brief IS the analysis."""
+    bar = st.progress(30, text="Carrying the verified brief into the record…")
+    _persist_brief_to_ssot(batch_id)
+    bar.progress(100, text="Brief is the source of truth")
+    st.session_state.aam_confirmed_batches.add(batch_id)
+    st.session_state.aam_analysis_requested.add(batch_id)  # brief is the analysis
+    st.rerun()
+
+
 def _confirm_aam_and_ingest(agent: AgentSession, verified: dict) -> None:
-    """Confirm handler: run the full ingest, apply verified values, unlock
-    analysis. Renders a progress bar + step description in the column it's
-    invoked from (the left process box)."""
+    """Legacy / no-LLM path: run the full bounded ingest, apply verified values,
+    unlock analysis. Used when no Deal Brief is available (no API key)."""
     batch_id = frozenset(st.session_state.uploaded_filenames)
     files = sorted(st.session_state.uploaded_filenames)
 
