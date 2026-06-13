@@ -190,6 +190,12 @@ _SESSION_DEFAULTS: dict = {
     # Batches for which the user explicitly requested analysis (staged: facts
     # are confirmed first, then analysis is a separate deliberate step).
     "aam_analysis_requested": set(),
+    # --- Workbook Orientation (runs BEFORE AAM extraction) ---
+    # Orientation result for the current batch: the workbook map (sheet roles,
+    # confidences, signals) from workbook_orientation.orient_workbook.
+    "wb_orientation":        None,
+    # Which batch (frozenset of filenames) wb_orientation belongs to.
+    "wb_orientation_batch":  None,
     # --- Deal Analyzer 3-column frontend (deal_review) ---
     # Findings folded into the Outcome (middle column) from the chat / deep-dives.
     # Shape: list of {"id": str, "title": str, "content": str}
@@ -261,6 +267,8 @@ def _wipe_uploads_and_reset_ssot() -> None:
     st.session_state.aam_confirmed_batches = set()
     st.session_state.aam_fill_version = 0
     st.session_state.aam_analysis_requested = set()
+    st.session_state.wb_orientation = None
+    st.session_state.wb_orientation_batch = None
 
 
 def _activate_scenario(scenario_key: str) -> None:
@@ -806,6 +814,13 @@ def _render_process_inputs(files, batch_id, confirmed: bool) -> None:
             st.session_state.uploaded_filenames = current
             st.rerun()
 
+    # Workbook Orientation runs FIRST — understand the workbook's structure
+    # before searching it for metrics — and its map is shown here so the user
+    # can verify the engine oriented correctly before extraction output appears.
+    if batch_id:
+        _ensure_workbook_oriented()
+        _render_orientation_panel(batch_id)
+
     # Run the AAM extraction here (pre-confirm) so its progress bar lives in
     # this box — the middle column then renders from the cached records.
     if batch_id and not confirmed:
@@ -1343,6 +1358,95 @@ def _rederive_noi_from_verified(records: dict, verified: dict) -> None:
         }
 
 
+def _ensure_workbook_oriented() -> dict | None:
+    """
+    Run Workbook Orientation once per batch, BEFORE AAM extraction. Lightweight,
+    deterministic, read-only — it classifies each sheet's role (summary / inputs
+    / returns / model / support) from content and structure so extraction knows
+    where to look first. Non-destructive: on failure the orientation is stored
+    with an error and extraction falls back to today's behavior.
+    """
+    batch_id = frozenset(st.session_state.uploaded_filenames)
+    if st.session_state.wb_orientation_batch == batch_id and st.session_state.wb_orientation:
+        return st.session_state.wb_orientation
+    primary = sorted(st.session_state.uploaded_filenames)[0]
+    note = st.empty()
+    note.caption(f"Orienting: reading {primary}'s structure before extraction…")
+    from workbook_orientation import orient_workbook
+    try:
+        st.session_state.wb_orientation = orient_workbook(UPLOAD_DIR / primary)
+    except Exception as e:
+        st.session_state.wb_orientation = {"error": f"{type(e).__name__}: {e}"}
+    st.session_state.wb_orientation_batch = batch_id
+    note.empty()
+    return st.session_state.wb_orientation
+
+
+def _orientation_tier_map_for(batch_id) -> dict | None:
+    """The orientation tier map for this batch, or None (→ legacy behavior)."""
+    if st.session_state.wb_orientation_batch != batch_id:
+        return None
+    from workbook_orientation import orientation_tier_map
+    return orientation_tier_map(st.session_state.wb_orientation)
+
+
+_ROLE_LABELS = [
+    ("summary", "Summary"), ("inputs", "Inputs"), ("returns", "Returns"),
+    ("model", "Financial Model"), ("support", "Support"), ("other", "Other"),
+]
+
+
+def _render_orientation_panel(batch_id) -> None:
+    """Visible Workbook Orientation section (debug): the workbook map, per-sheet
+    roles, confidences, and the signals behind them — shown before extraction
+    output so the user can verify the engine understood the workbook."""
+    ori = st.session_state.wb_orientation
+    if not ori or st.session_state.wb_orientation_batch != batch_id:
+        return
+    if ori.get("error"):
+        with st.expander("🧭 Workbook Orientation — failed", expanded=False):
+            st.caption(f"{ori['error']} — extraction will use name-based sheet tiers.")
+        return
+
+    sheets = ori.get("sheets", {})
+    rmap = ori.get("map", {})
+    n_mapped = sum(len(v) for k, v in rmap.items() if k != "other")
+    with st.expander(f"🧭 Workbook Orientation — {n_mapped}/{len(sheets)} sheets mapped",
+                     expanded=False):
+        st.caption(
+            "Sheet roles read from content & structure (names are only a weak "
+            "signal). Extraction searches Summary → Inputs → Returns first."
+        )
+        for role_key, label in _ROLE_LABELS:
+            names = rmap.get(role_key) or []
+            if not names:
+                continue
+            st.markdown(
+                f"**{label}:** " + " · ".join(
+                    f"{n} ({sheets[n]['confidence']:.2f})" for n in names
+                )
+            )
+        st.dataframe(
+            [
+                {
+                    "sheet": name,
+                    "role": info["role"],
+                    "confidence": info["confidence"],
+                    "keywords": ", ".join(
+                        f"{k}:{v}" for k, v in info["signals"]["kw"].items() if v
+                    ) or "—",
+                    "hardcode %": int(info["signals"]["hardcode_ratio"] * 100),
+                    "pulls": info["signals"]["pulls_from_other_sheets"],
+                    "referenced by": info["signals"]["referenced_by_other_sheets"],
+                    "ts rows": info["signals"]["time_series_rows"],
+                }
+                for name, info in sheets.items()
+            ],
+            width="stretch",
+            hide_index=True,
+        )
+
+
 def _ensure_aam_extracted() -> dict:
     """Extract the AAM once per batch (deterministic, fast, free) and return the
     records dict. GPT fires only on the explicit blank-fill action. Shows a
@@ -1354,7 +1458,13 @@ def _ensure_aam_extracted() -> dict:
         note = st.empty()
         note.caption(f"Mapping sheets and extracting audit-appendix metrics from {primary}.")
         from aam_extractor import extract_aam
-        st.session_state.aam_records = extract_aam(UPLOAD_DIR / primary, use_gpt_gap_fill=False)
+        # The Workbook Orientation map (computed before this) drives sheet
+        # priority: Summary → Inputs → Returns first. None → legacy tiers.
+        st.session_state.aam_records = extract_aam(
+            UPLOAD_DIR / primary,
+            use_gpt_gap_fill=False,
+            sheet_tier_map=_orientation_tier_map_for(batch_id),
+        )
         bar.progress(70, text="Tagging table periodicity…")
         note.caption("Detecting model tables so each metric inherits its table's periodicity.")
         # Tag flow metrics with their table's periodicity (cached parse).
@@ -1447,7 +1557,11 @@ def _fill_aam_blanks(records: dict) -> None:
     primary = sorted(st.session_state.uploaded_filenames)[0]
     bar = st.progress(20, text="Filling blanks with a focused GPT read…")
     from aam_extractor import fill_aam_blanks
-    filled = fill_aam_blanks(UPLOAD_DIR / primary, records)
+    # Scope the fill by the same orientation map the extraction used.
+    filled = fill_aam_blanks(
+        UPLOAD_DIR / primary, records,
+        sheet_tier_map=_orientation_tier_map_for(frozenset(st.session_state.uploaded_filenames)),
+    )
     bar.progress(80, text="Re-tagging table periodicity…")
     # Re-tag periodicity so newly-filled flow metrics inherit it too (cached).
     try:

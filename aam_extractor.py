@@ -46,7 +46,7 @@ if not log.handlers:
     log.addHandler(_h)
     log.setLevel(logging.INFO)
 
-AAM_EXTRACTOR_VERSION = "2026-06-11.1"
+AAM_EXTRACTOR_VERSION = "2026-06-12.2"
 
 # Statuses the GPT gap-fill may touch. STRICTLY blanks and flagged-wrong rows.
 # candidate_pool is deliberately NOT here: it means the deterministic pass
@@ -55,8 +55,13 @@ AAM_EXTRACTOR_VERSION = "2026-06-11.1"
 # BAC. GPT fills holes; it does not second-guess the deterministic ranking.
 _GAP_STATUSES = {"missing", "suspicious"}
 
-# Max labeled pairs to hand the focused GPT read (keeps one call cheap).
+# Max labeled pairs to hand the focused GPT read (legacy fallback payload).
 _MAX_PAIRS = 450
+
+# Max Stage-1 sheets rendered whole for the focused GPT read. Tier-ordered, so
+# the one-pager / inputs sheets always make the cut; the per-sheet and total
+# char caps in render_sheets_text bound the token cost.
+_MAX_READ_SHEETS = 8
 
 # Stage 1 reads ONLY the sheets an analyst opens first: the one-pager (name
 # tier 1), inputs / assumptions / sources&uses (tier 2), and secondary
@@ -71,6 +76,7 @@ def extract_aam(
     layer: str = "underwriting",
     sheet_classification: dict[str, dict] | None = None,
     use_gpt_gap_fill: bool = True,
+    sheet_tier_map: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """
     Run the focused Stage-1 AAM extraction.
@@ -82,6 +88,9 @@ def extract_aam(
                             present, classify_sheets is called once (GPT #1).
       use_gpt_gap_fill:     run the single focused GPT gap-fill (GPT #2) for AAM
                             fields the deterministic pass left missing/ambiguous.
+      sheet_tier_map:       pre-computed {sheet: tier} from Workbook Orientation.
+                            When supplied it drives sheet priority directly and
+                            the GPT sheet classification (call #1) is skipped.
 
     Returns:
       { metric_name: resolver_record }  for every AAM field, in AAM order.
@@ -96,8 +105,19 @@ def extract_aam(
         for m in aam_metrics(catalog)
     ]
 
-    # --- Step 1: Workbook Mapper (GPT call #1, batched, cheap) ----------------
-    classification, sheet_tier_map = _build_tier_map(file_path, sheet_classification)
+    # --- Step 1: Workbook Mapper ----------------------------------------------
+    # Preferred source: the Workbook Orientation tier map (deterministic,
+    # content-based, computed before extraction). Falls back to the GPT
+    # classifier (call #1) / name-based tiers when no map is supplied.
+    if sheet_tier_map is not None:
+        classification = sheet_classification or {}
+        log.info(
+            "Using Workbook Orientation tier map for %s (%d sheets) — "
+            "GPT sheet classification skipped.",
+            file_path.name, len(sheet_tier_map),
+        )
+    else:
+        classification, sheet_tier_map = _build_tier_map(file_path, sheet_classification)
 
     # --- Step 1.5: Stage-1 scope — summary / one-pager / inputs sheets ONLY ---
     stage1_tiers, formula_cells = _stage1_context(file_path, sheet_tier_map)
@@ -153,7 +173,11 @@ def extract_aam(
     return records
 
 
-def fill_aam_blanks(file_path: str | Path, records: dict[str, Any]) -> int:
+def fill_aam_blanks(
+    file_path: str | Path,
+    records: dict[str, Any],
+    sheet_tier_map: dict[str, int] | None = None,
+) -> int:
     """
     Run the focused GPT gap-fill (GPT #2) over the blank/ambiguous rows of an
     EXISTING records dict (produced by a prior deterministic extract_aam).
@@ -162,6 +186,9 @@ def fill_aam_blanks(file_path: str | Path, records: dict[str, Any]) -> int:
     only the gaps, re-validated through resolve_metric, then re-normalized.
     Mutates `records` in place; returns the number of fields filled. Silently
     no-ops (returns 0) when no API key is available.
+
+    `sheet_tier_map` is the Workbook Orientation map; when supplied the fill is
+    scoped by the same orientation-driven whitelist the extraction used.
     """
     if not llm_available():
         return 0
@@ -176,9 +203,9 @@ def fill_aam_blanks(file_path: str | Path, records: dict[str, Any]) -> int:
     ]
     if not gaps:
         return 0
-    # Rebuild the Stage-1 scope name-based (the gate doesn't hold the GPT sheet
-    # classification); same whitelist discipline as the extract-time fill.
-    stage1_tiers, formula_cells = _stage1_context(Path(file_path), None)
+    # Rebuild the Stage-1 scope from the orientation map when available, else
+    # name-based; same whitelist discipline as the extract-time fill.
+    stage1_tiers, formula_cells = _stage1_context(Path(file_path), sheet_tier_map)
     filled = _focused_gap_fill(
         Path(file_path), gaps, records, stage1_tiers, formula_cells
     )
@@ -344,17 +371,33 @@ def _focused_gap_fill(
     value is what gets used), then re-validated through resolve_metric so schema
     bounds still apply. Mutates `records` in place; returns fields filled.
     """
-    pairs = extract_raw_labeled_pairs(file_path, max_pairs=1200)
-    pairs = [p for p in pairs if stage1_tiers.get(p.get("sheet"), 99) != 99]
-    if not pairs:
-        return 0
+    # PRIMARY payload: the WHOLE-SHEET text of the Stage-1 sheets (summary /
+    # inputs / returns), tier-ordered — the model reads the actual pages an
+    # analyst reads, with table structure intact, instead of a flattened
+    # label/value pair list. Every claimed hit is still grounded against the
+    # real cell and re-validated through resolve_metric below — comprehension
+    # got better; the trust machinery is unchanged.
+    from workbook_orientation import render_sheets_text
+    stage1_sheets = _select_read_sheets(stage1_tiers)
+    cells_block = ""
+    if stage1_sheets:
+        try:
+            cells_block = render_sheets_text(file_path, stage1_sheets, formula_cells)
+        except Exception as e:
+            log.error("Whole-sheet render failed for %s: %s", file_path.name, e)
 
-    # Mark hard-coded (non-formula) cells so GPT can prefer true model inputs.
-    for p in pairs:
-        fset = formula_cells.get(p.get("sheet"))
-        p["is_hardcoded"] = (fset is not None) and (p.get("cell") not in fset)
+    if not cells_block:
+        # Fallback: the legacy labeled-pair payload.
+        pairs = extract_raw_labeled_pairs(file_path, max_pairs=1200)
+        pairs = [p for p in pairs if stage1_tiers.get(p.get("sheet"), 99) != 99]
+        if not pairs:
+            return 0
+        for p in pairs:
+            fset = formula_cells.get(p.get("sheet"))
+            p["is_hardcoded"] = (fset is not None) and (p.get("cell") not in fset)
+        cells_block = _pairs_block(pairs, stage1_tiers)
 
-    result = _aam_gpt_call(gaps, pairs, stage1_tiers)
+    result = _aam_gpt_call(gaps, cells_block)
     if not result:
         return 0
 
@@ -429,23 +472,28 @@ def _focused_gap_fill(
 
 
 _AAM_SYSTEM_PROMPT = """\
-You are a real estate analyst reading an underwriting workbook. You are given a
-flat list of labeled cells (sheet, cell, label, value) and a short list of
-specific metrics to find. The cells come ONLY from the model's authoritative
-summary / one-pager / inputs / assumptions sheets — the sheets an analyst reads
-first. Find ONLY the metrics requested. For each one, return the single best
-cell: its value, the exact sheet name, and the cell reference.
+You are a real estate analyst reading an underwriting workbook. You are given
+the FULL CONTENT of the model's authoritative sheets — the summary / one-pager
+/ inputs / assumptions / returns tabs an analyst reads first. Each sheet is
+rendered row by row; every cell carries its A1 reference (e.g. C5=224100).
+You are also given a short list of specific metrics to find. Read the sheets
+the way an analyst would — headers, table structure, and context matter. For
+each requested metric, return the single best cell: its value, the exact sheet
+name, and the cell reference.
 
 Rules:
 - Use the value EXACTLY as it appears in the cell. NEVER compute, infer, scale,
   or adjust a value — your answer is checked against the actual cell and any
   mismatch is rejected.
-- Cells tagged [input] are hard-coded by the modeler (not formulas). For deal
-  assumptions — cap rates, interest rate / spread / cap, LTV, dates, unit
-  counts — prefer an [input] cell over a computed one.
+- A trailing * on a number (e.g. C5=0.0817*) marks a HARD-CODED modeler input
+  (not a formula). For deal assumptions — cap rates, interest rate / spread /
+  cap, LTV, dates, unit counts — prefer a * cell over a computed one.
 - PORTFOLIO MODELS: a deal may bundle several assets (two hotels, asset +
   parking). Per-asset columns or allocation blocks show SLICES of the deal —
   always pick the COMBINED / TOTAL deal-level cell, never one asset's share.
+- Mind each sheet's units: a header like "$ in 000s" means cell values are
+  thousands — still return the cell's literal value (the checker compares
+  against the cell), never a rescaled one.
 - If you cannot find a metric with reasonable confidence, OMIT it (do not guess).
 - Confidence is "high", "medium", or "low".
 
@@ -458,24 +506,46 @@ Return ONLY JSON, no prose, no code fences:
 """
 
 
-def _aam_gpt_call(
-    gaps: list[dict],
-    pairs: list[dict],
-    stage1_tiers: dict[str, int] | None = None,
-) -> dict[str, dict]:
-    """Single focused GPT call. Returns { metric_id: {value, sheet, cell, confidence} }."""
-    # Prefer pairs on lower-tier (more authoritative) sheets, keep the cap.
+def _select_read_sheets(stage1_tiers: dict[str, int]) -> list[str]:
+    """
+    Pick the sheets to read WHOLE for the focused GPT pass — the analyst's
+    short stack: a few summary sheets, the inputs sheet(s), one more. Within
+    each tier the NAME tier breaks ties (an explicit "One Pager" / "Executive
+    Summary" name beats template tabs that content-classified into the same
+    tier), mirroring the resolver's own tiebreak. Backfills to _MAX_READ_SHEETS
+    from the remaining whitelisted sheets when a tier is thin.
+    """
+    by_name_rank = lambda n: (sheet_priority_tier(n), n)
+    picked: list[str] = []
+    for tier, quota in ((1, 4), (2, 2), (3, 2)):
+        group = sorted((n for n, t in stage1_tiers.items() if t == tier), key=by_name_rank)
+        picked.extend(group[:quota])
+    if len(picked) < _MAX_READ_SHEETS:
+        rest = sorted(
+            (n for n, t in stage1_tiers.items() if t != 99 and n not in picked),
+            key=lambda n: (stage1_tiers[n], *by_name_rank(n)),
+        )
+        picked.extend(rest[: _MAX_READ_SHEETS - len(picked)])
+    return picked[:_MAX_READ_SHEETS]
+
+
+def _pairs_block(pairs: list[dict], stage1_tiers: dict[str, int] | None) -> str:
+    """Legacy fallback payload: flat labeled-cell lines, tier-ordered."""
     def _ptier(p):
         if stage1_tiers:
             return stage1_tiers.get(p.get("sheet"), p.get("sheet_tier", 99))
         return p.get("sheet_tier", 99)
     pairs_sorted = sorted(pairs, key=_ptier)[:_MAX_PAIRS]
-    pair_lines = [
+    return "\n".join(
         f"{p['sheet']}!{p['cell']}  {p['label']} = {p['value']}"
         + (" [input]" if p.get("is_hardcoded") else "")
         for p in pairs_sorted
-    ]
+    )
 
+
+def _aam_gpt_call(gaps: list[dict], cells_block: str) -> dict[str, dict]:
+    """Single focused GPT call over the rendered sheet content.
+    Returns { metric_id: {value, sheet, cell, confidence} }."""
     metric_lines = []
     for m in gaps:
         rng = f"[{m.get('range_min')}, {m.get('range_max')}]"
@@ -487,7 +557,7 @@ def _aam_gpt_call(
 
     user_msg = (
         "METRICS TO FIND:\n" + "\n".join(metric_lines)
-        + "\n\nLABELED CELLS:\n" + "\n".join(pair_lines)
+        + "\n\nWORKBOOK CONTENT (authoritative sheets):\n" + cells_block
     )
 
     try:
