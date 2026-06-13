@@ -449,3 +449,133 @@ def run_deep_dive(name: str) -> dict[str, Any]:
     if not fn:
         return {"error": f"Unknown deep dive: {name}. Valid: {sorted(DEEP_DIVES.keys())}"}
     return fn()
+
+
+# ---------------------------------------------------------------------------
+# Agent-driven deep dives — the dive as a task for the tool-equipped agent
+# ---------------------------------------------------------------------------
+# Instead of a single-shot prompt over already-extracted SSOT data, the dive
+# becomes an instruction the chat agent executes WITH ITS FILE TOOLS: read the
+# relevant sheets (read_sheet / search_file), then write the section. This is
+# how an analyst answers "dig into returns" — they go back to the workbook.
+# The static functions above remain as the no-orientation fallback.
+
+# Per-dive reading plan: which workbook-map roles to read, what to search for,
+# and the section's output spec (bullets, never tables — app-wide rule).
+_AGENT_DIVE_SPECS: dict[str, dict[str, Any]] = {
+    "capital_structure": {
+        "title": "Capital Structure",
+        "read_roles": ("inputs", "summary"),
+        "search_hint": "debt, loan, interest rate, spread, LTV, DSCR, maturity",
+        "output": """\
+## Capital Structure
+- **Purchase Price / Total Project Cost / Loan(s) / Equity Required** with cell refs
+- **LTV or LTC**, **Interest Rate** (floating: spread + cap strike + max effective rate)
+- **Loan Maturity / I/O Period / DSCR / Debt Yield** where present
+Omit missing bullets. Close with 1-2 sentences on the capital stack's
+risk/return profile. Max 200 words.""",
+    },
+    "cash_flow": {
+        "title": "Cash Flow / NOI Trajectory",
+        "read_roles": ("model", "summary"),
+        "search_hint": "NOI, net operating income, revenue, operating expenses, cash flow",
+        "output": """\
+## Cash Flow / NOI Trajectory
+- **Year 1 (going-in) NOI / Stabilized NOI (+ stabilization year) / Exit NOI** with cell refs
+Annualize monthly tables before citing annual figures (say "annualized").
+Close with 2-3 sentences on the trajectory shape (flat / growth / dev ramp /
+value-add lift) and its drivers. Max 250 words.""",
+    },
+    "return_profile": {
+        "title": "Return Profile",
+        "read_roles": ("returns", "summary"),
+        "search_hint": "IRR, equity multiple, waterfall, promote, sensitivity",
+        "output": """\
+## Return Profile
+- **Levered IRR / Unlevered IRR / Equity Multiple / Going-In Cap / Exit Cap /
+  Exit Value / Hold Period** with cell refs
+If the workbook has sensitivity or scenario tables, read them and add 1-2
+bullets on what swings the return most (with the specific deltas).
+Close with 2-3 sentences on where the return comes from (yield / cap
+compression / operational uplift / development premium). Max 250 words.""",
+    },
+    "capex_plan": {
+        "title": "CapEx Plan",
+        "read_roles": ("support", "model"),
+        "search_hint": "capex, renovation, hard cost, soft cost, draw schedule, TI",
+        "output": """\
+## CapEx Plan
+- **Total CapEx Budget / Total Project Cost** with cell refs; per-key or per-SF
+  basis when the size metrics allow
+- Multi-year draw schedule as bullets when present
+Close with 2-3 sentences on what the CapEx buys (deferred maintenance, unit
+renovation, systems, ground-up). Max 250 words.""",
+    },
+    "key_risks": {
+        "title": "Key Risks",
+        "read_roles": ("summary", "inputs"),
+        "search_hint": "sensitivity, scenario, assumptions, growth, vacancy",
+        "output": """\
+## Key Risks
+3-5 numbered risks SPECIFIC TO THIS DEAL, each tied to a specific number,
+cell, or assumption you read (cite Sheet!Cell). FORBIDDEN: generic boilerplate
+("market risk") without a model-grounded basis. If sensitivity tables exist,
+ground at least one risk in them. Max 250 words.""",
+    },
+}
+
+
+def agent_dive_instruction(
+    name: str,
+    workbook_map: dict[str, list[str]] | None,
+    source_file: str | None,
+) -> str | None:
+    """
+    Build the agent task for a deep dive: read the right sheets first, then
+    write the section. `workbook_map` is the Workbook Orientation role map
+    ({role: [sheet names]}); when absent the agent is told to list sheets and
+    choose. Returns None for an unknown dive name.
+    """
+    spec = _AGENT_DIVE_SPECS.get(name)
+    if not spec:
+        return None
+
+    # Within each role, an explicit NAME ("One Pager", "NOI", "Cash Flow")
+    # outranks template tabs that content-classified into the same role —
+    # the stable sort keeps the orientation's confidence order within ties.
+    from flexible_extractor import sheet_priority_tier
+    read_sheets: list[str] = []
+    if workbook_map:
+        for role in spec["read_roles"]:
+            names = sorted(workbook_map.get(role) or [], key=sheet_priority_tier)
+            read_sheets.extend(names[:3])
+    if workbook_map:
+        map_lines = "\n".join(
+            f"  {role}: {', '.join(names)}"
+            for role, names in workbook_map.items()
+            if names and role != "other"
+        )
+        map_block = f"Workbook map (sheet roles from content analysis):\n{map_lines}\n"
+    else:
+        map_block = "No workbook map available — call list_sheets first and choose.\n"
+
+    reading_plan = (
+        f"Start by reading: {', '.join(dict.fromkeys(read_sheets))} (read_sheet)."
+        if read_sheets else
+        "Pick the most relevant sheets from the map / list_sheets."
+    )
+
+    return f"""\
+Deep dive: {spec['title']} — for the deal in `{source_file or 'the uploaded workbook'}`.
+
+{map_block}
+Work like an analyst answering "dig into {spec['title'].lower()}":
+1. {reading_plan} Use search_file for anything you can't locate
+   (try: {spec['search_hint']}). Read MORE sheets if a number needs chasing.
+2. Cross-check what you read against the verified SSOT facts
+   (get_layer_details for "underwriting") — human-verified values GOVERN on
+   any disagreement; never overrule them with a raw cell.
+3. Then write EXACTLY this section, citing Sheet!Cell for every figure.
+   Bullets only — NEVER markdown tables.
+
+{spec['output']}"""

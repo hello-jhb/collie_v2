@@ -23,12 +23,13 @@ import tools
 from scenarios._llm import get_client
 
 
-# Routing model: handles "which tool to call next" decisions during follow-up
-# Q&A. Mini is ~3x faster and ~10x cheaper than gpt-4o for this kind of work,
-# and the routing decisions are simple ("call get_layer_details with this arg").
-# The actual narrative generation still uses gpt-4o (in scenarios/_llm.py),
-# which is what we care about for output quality.
-MODEL = "gpt-4o-mini"
+# Agent model. This loop no longer just routes tool calls — deep dives now run
+# THROUGH it (it reads workbook sheets with its tools and writes the analysis),
+# and chat answers synthesize raw sheet content. That's comprehension work, so
+# it gets the strong model; the per-deal cost is a few cents and the output is
+# the product. Cost-sensitive bulk calls (classifier, insight pass, section
+# reader) stay on MODEL_FAST in scenarios/_llm.py.
+MODEL = "gpt-4o"
 MAX_TOOL_ITERATIONS = 10  # cap on tool calls per single user message
 
 

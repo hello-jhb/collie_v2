@@ -37,7 +37,7 @@ from flexible_extractor import (
     sheet_priority_tier,
 )
 from metric_resolver import resolve_metric
-from scenarios._llm import client, MODEL_FAST, llm_available
+from scenarios._llm import client, MODEL, llm_available
 
 log = logging.getLogger("fb.aam_extractor")
 if not log.handlers:
@@ -541,7 +541,9 @@ def _aam_gpt_call(gaps: list[dict], cells_block: str) -> dict[str, dict]:
         from knowledge_store import with_active_rules
         system_content = with_active_rules(_AAM_SYSTEM_PROMPT, ["metric_resolution", "validation"])
         response = client.chat.completions.create(
-            model=MODEL_FAST,
+            # Strong model: this call READS whole sheets (10k+ tokens of real
+            # table structure) and one good fill per deal is worth cents.
+            model=MODEL,
             temperature=0.0,
             messages=[
                 {"role": "system", "content": system_content},
