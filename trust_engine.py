@@ -334,13 +334,22 @@ def score_facts(
     file_path: str | Path,
     orientation: dict | None = None,
     run_challenge: bool = True,
+    authoritative_sheets: set[str] | None = None,
+    cells_block: str | None = None,
 ) -> dict[str, Any]:
     """
-    Score every fact in a Model Brief. Returns:
+    Score every fact in a Model Brief OR a focused dive. Returns:
       {"facts": [fact + "trust"], "summary": {high, medium, flagged, omitted}}
 
     Each fact gains a "trust" block: grounded, authoritative, reconciles,
     challenge, confidence (high|medium|low), verdict (show|flag|omit), notes.
+
+    authoritative_sheets: when given, a fact cited from one of these sheets is
+        AUTHORITATIVE — used by dives, where the topic's own tabs (the NOI sheet
+        for cash flow, the Debt sheet for leverage) are the authority, not the
+        brief's summary/inputs tabs. Falls back to the orientation-role check.
+    cells_block: pre-rendered sheet text to challenge against (the dive already
+        rendered its sheets — reuse it instead of re-reading the summary tabs).
     """
     file_path = Path(file_path)
     facts = [dict(f) for f in (brief.get("facts") or [])]
@@ -358,13 +367,16 @@ def score_facts(
     # Check 3 — reconciliation over the whole fact set
     recon = _reconcile(facts)
 
-    # Check 4/5 — adversarial challenge (one GPT call)
+    # Check 4/5 — adversarial challenge (one GPT call). Challenge against the
+    # supplied block (dive's own sheets) or, for the brief, the summary tabs.
     challenge: dict[int, dict] = {}
     if run_challenge and llm_available():
         try:
-            from workbook_orientation import analyst_reading_stack
-            _, cells_block = analyst_reading_stack(file_path)
-            challenge = _challenge(facts, cells_block)
+            block = cells_block
+            if block is None:
+                from workbook_orientation import analyst_reading_stack
+                _, block = analyst_reading_stack(file_path)
+            challenge = _challenge(facts, block)
         except Exception as e:
             log.error("Challenge stage skipped: %s", e)
 
@@ -401,7 +413,11 @@ def score_facts(
                     grounded, corrected_cell = True, coord
                     break
 
-        authoritative, role = _authoritative(s, orientation)
+        if authoritative_sheets is not None:
+            authoritative = s in authoritative_sheets
+            role = "topic" if authoritative else (s or None)
+        else:
+            authoritative, role = _authoritative(s, orientation)
         rec = recon.get(i)  # (passed, name) or None
         ch = challenge.get(i, {})
         ch_status = ch.get("status")

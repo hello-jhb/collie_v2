@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 import ssot
-from scenarios._llm import complete, llm_available
+from scenarios._llm import complete, llm_available, log
 from flexible_extractor import extract_time_series_rows
 
 
@@ -598,14 +598,54 @@ _FOCUSED_SYSTEM = """\
 You are a real estate analyst writing ONE section of an IC memo. You are given
 the FULL CONTENT of the workbook tabs that hold this topic (each cell with its
 A1 reference). Read them the way an analyst does — headers, table structure, and
-units matter. Report ONLY what the cells support; cite Sheet!Cell for every
-figure; never invent a number. Mind units headers ("$ in 000s" means a cell of
-26995 is $27.0M — report the real magnitude). Bullets, NEVER markdown tables.
+units matter. Report ONLY what the cells support; never invent a number. Mind
+units headers ("$ in 000s" means a cell of 26995 is $27.0M — report the real
+magnitude). Bullets in the narrative, NEVER markdown tables.
+
+Return BOTH the section narrative AND the structured facts behind it. Every
+number you cite must appear in `facts` with the EXACT sheet and cell it came
+from (so each can be verified against the workbook). For a composed figure
+(per-key, a sum), set `composed_from` to the short arithmetic.
+
+Return ONLY JSON, no prose outside it, no code fences:
+{
+  "facts": [
+    {"field": "<label>", "value": <number or string>, "display": "<$27.0M>",
+     "sheet": "<exact sheet>", "cell": "<A1>", "composed_from": null}
+  ],
+  "narrative": "<the section as markdown bullets + prose>"
+}
 """
 
 
+def _factcheck_md(scored: dict) -> str:
+    """Compact fact-check block appended to a dive so its credibility travels
+    with it in the transcript."""
+    facts = scored.get("facts") or []
+    if not facts:
+        return ""
+    s = scored.get("summary", {})
+    mark = {"show": "✓", "flag": "⚠", "omit": "✕"}
+    lines = [
+        f"**Fact check** — {s.get('high',0)} high · {s.get('medium',0)} medium · "
+        f"{s.get('flagged',0)} flagged · {s.get('omitted',0)} omitted"
+    ]
+    for f in facts:
+        t = f.get("trust", {})
+        line = (f"{mark.get(t.get('verdict'),'·')} {f.get('field')}: "
+                f"{f.get('display', f.get('value'))} ({f.get('sheet')}!{f.get('cell')})")
+        if t.get("notes"):
+            line += f" — {'; '.join(t['notes'])[:140]}"
+        lines.append(line)
+    return "\n\n".join(["\n".join(lines[:1] + ["- " + l for l in lines[1:]])])
+
+
 def focused_dive(topic: str, file_path, orientation: dict | None) -> dict[str, Any]:
-    """Comprehension dive: read the topic's sheets whole, summarize in one pass."""
+    """Comprehension dive: read the topic's sheets whole, extract cell-cited
+    facts + narrative in one pass, then score the facts through the SAME trust
+    engine the brief uses (grounding / reconcile / challenge — scoped to these
+    sheets) and finalize the narrative to verified facts. The dive carries the
+    same credibility as the brief."""
     spec = _TOPIC_READ.get(topic)
     if not spec:
         return {"error": f"Unknown analysis: {topic}"}
@@ -634,12 +674,43 @@ def focused_dive(topic: str, file_path, orientation: dict | None) -> dict[str, A
                 {"role": "user", "content": user_msg},
             ],
         )
-        text = (resp.choices[0].message.content or "").strip()
+        raw = (resp.choices[0].message.content or "").strip()
     except Exception as e:
         return {"error": f"{spec['title']} read failed: {type(e).__name__}: {e}"}
-    if not text:
-        return {"error": f"{spec['title']} returned nothing."}
-    return {"section": topic, "title": spec["title"], "narrative": text, "sheets_read": sheets}
+
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        parsed = {"facts": [], "narrative": raw}  # tolerate prose-only output
+    facts = parsed.get("facts") or []
+    narrative = (parsed.get("narrative") or "").strip()
+    if not narrative and not facts:
+        return {"error": f"{spec['title']} returned nothing usable."}
+
+    # Score the dive's facts through the trust engine — the dive's own sheets are
+    # the authority for this topic, and the challenge re-reads the SAME block.
+    scored = {"facts": [], "summary": {}}
+    final_md = narrative
+    try:
+        from trust_engine import score_facts
+        from model_brief import finalize_brief
+        scored = score_facts(
+            {"facts": facts}, file_path, orientation,
+            authoritative_sheets=set(sheets), cells_block=cells_block,
+        )
+        fin = finalize_brief({"brief_md": narrative, "facts": facts}, scored)
+        final_md = fin.get("brief_md") or narrative
+    except Exception as e:
+        log.error("Dive trust scoring failed for %s: %s", topic, e)
+
+    fc = _factcheck_md(scored)
+    body = f"## {spec['title']}\n\n{final_md}" + (f"\n\n---\n\n{fc}" if fc else "")
+    return {"section": topic, "title": spec["title"], "narrative": body,
+            "sheets_read": sheets, "scored": scored}
 
 
 # ---------------------------------------------------------------------------
