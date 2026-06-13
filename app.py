@@ -196,6 +196,10 @@ _SESSION_DEFAULTS: dict = {
     "wb_orientation":        None,
     # Which batch (frozenset of filenames) wb_orientation belongs to.
     "wb_orientation_batch":  None,
+    # --- Model Brief (comprehension-first read; step 1 of the rebuild) ---
+    # build_model_brief result for the current batch, and its batch id.
+    "model_brief":           None,
+    "model_brief_batch":     None,
     # --- Deal Analyzer 3-column frontend (deal_review) ---
     # Findings folded into the Outcome (middle column) from the chat / deep-dives.
     # Shape: list of {"id": str, "title": str, "content": str}
@@ -269,6 +273,8 @@ def _wipe_uploads_and_reset_ssot() -> None:
     st.session_state.aam_analysis_requested = set()
     st.session_state.wb_orientation = None
     st.session_state.wb_orientation_batch = None
+    st.session_state.model_brief = None
+    st.session_state.model_brief_batch = None
 
 
 def _activate_scenario(scenario_key: str) -> None:
@@ -881,6 +887,7 @@ def _render_outcome_column(agent: AgentSession, batch_id, confirmed: bool, analy
         return None
 
     if not confirmed:
+        _render_model_brief(batch_id)
         return _render_aam_appendix(batch_id)
 
     _render_aam_summary()
@@ -1522,6 +1529,51 @@ def _ensure_aam_extracted() -> dict:
         st.session_state.aam_batch_id = batch_id
         st.session_state.aam_fill_version = 0
     return st.session_state.aam_records
+
+
+def _ensure_model_brief(batch_id) -> dict:
+    """Build the comprehension-first Model Brief once per batch (cached on disk
+    by file hash). Returns the brief dict (may carry an 'error')."""
+    if st.session_state.model_brief_batch == batch_id and st.session_state.model_brief:
+        return st.session_state.model_brief
+    primary = sorted(st.session_state.uploaded_filenames)[0]
+    bar = st.progress(15, text="Reading the deal (comprehension pass)…")
+    note = st.empty()
+    note.caption(f"Reading {primary}'s authoritative tabs the way an analyst does.")
+    from model_brief import build_model_brief
+    try:
+        brief = build_model_brief(UPLOAD_DIR / primary)
+    except Exception as e:
+        brief = {"error": f"{type(e).__name__}: {e}"}
+    bar.progress(100, text="Deal brief ready")
+    note.empty()
+    st.session_state.model_brief = brief
+    st.session_state.model_brief_batch = batch_id
+    return brief
+
+
+def _render_model_brief(batch_id) -> None:
+    """Comprehension-first deal read, shown ABOVE the verification gate so the
+    analyst sees the deal before verifying facts (and so we can judge the
+    comprehension read against the reference Outcome). Read-only; no gating."""
+    from scenarios._llm import llm_available
+    if not llm_available():
+        with st.container(border=True):
+            st.markdown("#### Model Brief")
+            st.caption("Set OPENAI_API_KEY to generate the comprehension read. "
+                       "The audit appendix below still works without it.")
+        return
+    brief = _ensure_model_brief(batch_id)
+    with st.container(border=True):
+        st.markdown("#### Model Brief — comprehension read")
+        if brief.get("error"):
+            st.caption(f"Couldn't generate the brief: {brief['error']}")
+            return
+        st.caption(
+            "Read from " + ", ".join(brief.get("sheets_read", []) or ["—"])
+            + " · not yet verified (trust engine is the next step)."
+        )
+        st.markdown(brief.get("brief_md", "_(empty)_"))
 
 
 def _render_aam_appendix(batch_id) -> "pd.DataFrame":
