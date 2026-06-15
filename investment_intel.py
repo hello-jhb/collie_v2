@@ -416,7 +416,18 @@ def _facts_block(facts: list[dict]) -> str:
     return "VERIFIED FACTS:\n" + ("\n".join(rows) or "(none)")
 
 
-def interpret(analytics: dict, facts: list[dict], identity: dict | None) -> str:
+def _guardrail_block(guardrails: list[str] | None) -> str:
+    """Bind the narrative to the deterministic validation results: things the
+    facts do NOT support, which the model must not assert."""
+    if not guardrails:
+        return ""
+    lines = "\n".join(f"- {g}" for g in guardrails)
+    return ("\n\nBINDING CONSTRAINTS — these are non-negotiable; obey every one and "
+            "never contradict them:\n" + lines)
+
+
+def interpret(analytics: dict, facts: list[dict], identity: dict | None,
+              guardrails: list[str] | None = None) -> str:
     """ONE gpt-4o call that explains the computed analytics. Returns markdown,
     or '' on failure (caller falls back to the deterministic template)."""
     if not llm_available():
@@ -424,7 +435,8 @@ def interpret(analytics: dict, facts: list[dict], identity: dict | None) -> str:
     ident = identity or {}
     head = (f"DEAL: {ident.get('asset') or 'Unnamed'} — {ident.get('property_type') or '?'}"
             f", {ident.get('location') or '?'}; strategy {ident.get('strategy') or '?'}.")
-    user_msg = head + "\n\n" + _analytics_block(analytics) + "\n\n" + _facts_block(facts)
+    user_msg = (head + "\n\n" + _analytics_block(analytics) + "\n\n"
+                + _facts_block(facts) + _guardrail_block(guardrails))
     try:
         resp = client.chat.completions.create(
             model=MODEL, temperature=0.2,
@@ -465,18 +477,21 @@ def _deterministic_view(analytics: dict) -> str:
 
 
 def build_investment_view(
-    scored: dict, identity: dict | None = None, use_llm: bool = True
+    scored: dict, identity: dict | None = None, use_llm: bool = True,
+    guardrails: list[str] | None = None,
 ) -> dict[str, Any]:
     """
-    Layer 3 entry point. `scored` is the trust_engine.score_facts output. Reasons
-    only over verified (verdict == 'show') facts, computes the analytics, and
-    writes the Initial View (GPT when available, deterministic template otherwise).
+    Layer 3 entry point. `scored` is the trust_engine.score_facts output (or a
+    canonical-fact set from deal_truth). Reasons only over verified (verdict ==
+    'show') facts, computes the analytics, and writes the Initial View (GPT when
+    available, deterministic template otherwise). `guardrails` (from deal_truth)
+    bind the narrative to what the validated facts actually support.
     """
     all_facts = scored.get("facts") or []
     verified = [f for f in all_facts if f.get("trust", {}).get("verdict") == "show"]
     analytics = compute_analytics(verified)
 
-    md = interpret(analytics, verified, identity) if use_llm else ""
+    md = interpret(analytics, verified, identity, guardrails) if use_llm else ""
     llm = bool(md)
     if not md:
         md = _deterministic_view(analytics)
