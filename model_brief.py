@@ -235,12 +235,19 @@ independently verified. You are given the draft brief plus three fact lists:
 VERIFIED (trustworthy), FLAGGED (a cross-check disagreed — surface but mark
 unverified), and OMITTED (could not be confirmed — must NOT appear).
 
+You may also be given CASH-FLOW VALIDATED facts (reconstructed and recomputed
+from the model's cash flow — the strongest source) and BINDING CONSTRAINTS.
+
 Rewrite the brief:
+- When a CASH-FLOW VALIDATED fact is present, use ITS value (it overrides the
+  draft and any VERIFIED value for the same metric). State returns, exit price,
+  hold period and the capital stack from these.
 - State VERIFIED numbers plainly, with their (Sheet!Cell).
 - For a FLAGGED number, you may mention it but append "(unverified — to confirm)"
   and, if given, note the conflicting value.
 - NEVER state an OMITTED number, and never invent one to fill the gap; just
   leave that point out.
+- Obey every BINDING CONSTRAINT; never assert what one forbids.
 - Keep the section structure (Overview, Key Deal Stats, Debt, Returns, Model
   Structure). Tight, executive, bullets — never markdown tables.
 
@@ -253,11 +260,15 @@ def _fact_line(f: dict) -> str:
     return f"- {f.get('field')}: {f.get('display', f.get('value'))} ({src})"
 
 
-def finalize_brief(brief: dict, scored: dict) -> dict[str, Any]:
+def finalize_brief(brief: dict, scored: dict, canonical: list[dict] | None = None,
+                   guardrails: list[str] | None = None) -> dict[str, Any]:
     """
     Regenerate the brief narrative so it asserts only verified facts — the
     "no wrong data" guarantee for what the user reads. `scored` is the
-    trust_engine.score_facts output.
+    trust_engine.score_facts output. `canonical` (from deal_truth.to_intel_facts)
+    are cash-flow-validated facts that OVERRIDE the brief's own extraction, and
+    `guardrails` (deal_truth.guardrail_lines) bind what may be asserted — so the
+    brief itself, not just Layer 3, runs off the validated spine.
 
     Returns {"brief_md", "finalized": bool, "counts": {...}}. Falls back to the
     original brief + a deterministic verified/flagged appendix when no LLM is
@@ -267,10 +278,14 @@ def finalize_brief(brief: dict, scored: dict) -> dict[str, Any]:
     verified = [f for f in facts if f.get("trust", {}).get("verdict") == "show"]
     flagged = [f for f in facts if f.get("trust", {}).get("verdict") == "flag"]
     omitted = [f for f in facts if f.get("trust", {}).get("verdict") == "omit"]
+    canonical = canonical or []
     counts = {"verified": len(verified), "flagged": len(flagged), "omitted": len(omitted)}
 
     def _deterministic() -> str:
         parts = [brief.get("brief_md", "")]
+        if canonical:
+            parts.append("**Cash-flow validated:**\n"
+                         + "\n".join(_fact_line(f) for f in canonical))
         if flagged:
             parts.append("**⚠ Flagged — verify before relying on these:**\n"
                          + "\n".join(_fact_line(f) for f in flagged))
@@ -279,21 +294,29 @@ def finalize_brief(brief: dict, scored: dict) -> dict[str, Any]:
                          + ", ".join(f.get("field", "?") for f in omitted) + "._")
         return "\n\n".join(p for p in parts if p)
 
-    if not verified and not flagged:
+    if not verified and not flagged and not canonical:
         return {"brief_md": brief.get("brief_md", ""), "finalized": False, "counts": counts}
     if not llm_available():
-        return {"brief_md": _deterministic(), "finalized": False, "counts": counts}
+        return {"brief_md": _deterministic(), "finalized": bool(canonical), "counts": counts}
 
     flagged_lines = []
     for f in flagged:
         better = (f.get("trust", {}).get("notes") or [""])[0]
         flagged_lines.append(_fact_line(f) + (f"  [{better}]" if better else ""))
 
+    guard_block = ""
+    if guardrails:
+        guard_block = "\n\nBINDING CONSTRAINTS (obey every one):\n" + \
+            "\n".join(f"- {g}" for g in guardrails)
+
     user_msg = (
         "DRAFT BRIEF:\n" + brief.get("brief_md", "") + "\n\n"
+        "CASH-FLOW VALIDATED (authoritative — override the draft):\n"
+        + ("\n".join(_fact_line(f) for f in canonical) or "(none)") + "\n\n"
         "VERIFIED:\n" + ("\n".join(_fact_line(f) for f in verified) or "(none)") + "\n\n"
         "FLAGGED:\n" + ("\n".join(flagged_lines) or "(none)") + "\n\n"
         "OMITTED:\n" + (", ".join(f.get("field", "?") for f in omitted) or "(none)")
+        + guard_block
     )
     try:
         resp = client.chat.completions.create(
