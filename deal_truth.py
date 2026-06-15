@@ -250,8 +250,8 @@ def detect_hold(oracle: dict) -> dict | None:
 #    Tier 2  summary point, formula-traced + identity cross-checked → "summary_*"
 # ---------------------------------------------------------------------------
 
-def _operating_tier1(m: dict, tables: list[dict]) -> dict:
-    """Operating rows from model-role tabs. Sums component rows within one table
+def _operating_tier1_tables(m: dict, tables: list[dict]) -> dict:
+    """Operating rows from the PARSED tables. Sums component rows within one table
     (mixed-use). Rejects all-zero rows — the reason the obvious rows fail on some
     models (cached as zeros / misaligned with the cash-flow date axis)."""
     engine = m.get("cashflow_engine")
@@ -290,6 +290,103 @@ def _operating_tier1(m: dict, tables: list[dict]) -> dict:
             }
             break
     return out
+
+
+def _scan_model_sheets_for_ops(m: dict, file_path: Path) -> dict:
+    """Gap-immune Tier 1: read operating rows DIRECTLY from model-role sheets the
+    generic table parser misses (formatted pro formas with section gaps stop the
+    parser's body scan). Finds the period header, then scans the whole sheet for
+    a CONSOLIDATED concept row — picking the single best row (most periods, then
+    largest magnitude: a total dominates its components), never summing (which
+    would double-count 'before/after' stages and component+total rows)."""
+    import openpyxl
+    from financial_model_parser import _detect_header, _gcell
+    engine = m.get("cashflow_engine")
+    sheets = [s for s, i in m["sheets"].items() if i["role"] == "model"]
+    if engine in sheets:                          # engine first
+        sheets = [engine] + [s for s in sheets if s != engine]
+    out: dict[str, Any] = {}
+    try:
+        wb = openpyxl.load_workbook(file_path, data_only=True, read_only=True)
+    except Exception:
+        return out
+    for sheet in sheets:
+        if sheet not in wb.sheetnames:
+            continue
+        ws = wb[sheet]
+        if not ws.max_row or ws.max_row > 600:
+            continue
+        grid = [r for r in ws.iter_rows(min_row=1, max_row=min(ws.max_row, 200),
+                                        max_col=min(ws.max_column or 1, 140), values_only=True)]
+        hdr = hrow = None
+        for r in range(1, len(grid) + 1):
+            h = _detect_header(grid, r)
+            if h:
+                hdr, hrow = h, r
+                break
+        if not hdr:
+            continue
+        pcols, dh = hdr["period_cols"], hdr["date_headers"]
+        rows_by: dict[str, list] = {}
+        for r in range(hrow + 1, len(grid) + 1):
+            label = next((str(_gcell(grid, r, c)).strip() for c in range(1, pcols[0])
+                          if isinstance(_gcell(grid, r, c), str) and _gcell(grid, r, c).strip()),
+                         None)
+            if not label:
+                continue
+            concept = _concept_of(label)
+            if concept not in ("noi", "revenue", "opex"):
+                continue
+            yr: dict[int, float] = {}
+            for i, c in enumerate(pcols):
+                v = _gcell(grid, r, c)
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and i < len(dh):
+                    dd = _iso(dh[i])
+                    if dd:
+                        yr[dd.year] = yr.get(dd.year, 0.0) + v
+            nz = {y: v for y, v in yr.items() if abs(v) > 1.0}
+            if nz:
+                rows_by.setdefault(concept, []).append(
+                    (label, r, yr, len(nz), sum(abs(v) for v in nz.values())))
+        for concept, rows in rows_by.items():
+            if concept in out:
+                continue
+            label, r, yr, _, _ = max(rows, key=lambda t: (t[3], t[4]))
+            bylist = sorted(yr.items())
+            nz = [(y, v) for y, v in bylist if abs(v) > 1.0]
+            out[concept] = {
+                "by_year": bylist, "going_in": nz[0][1], "terminal": nz[-1][1],
+                "stabilized": max(v for _, v in nz),
+                "source": f"{sheet}!row{r} '{label[:30]}'", "provenance": "operating_model",
+            }
+    try:
+        wb.close()
+    except Exception:
+        pass
+    return out
+
+
+def _operating_tier1(m: dict, tables: list[dict], file_path: Path) -> dict:
+    """Tier 1 = parsed tables first, then a gap-immune direct sheet scan for any
+    concept the parser missed (catches formatted pro formas)."""
+    out = _operating_tier1_tables(m, tables)
+    for concept, traj in _scan_model_sheets_for_ops(m, file_path).items():
+        out.setdefault(concept, traj)
+    return out
+
+
+def _noi_reconciles(noi_terminal, canonical: dict) -> bool | None:
+    """Does a terminal NOI tie to the deal exit (NOI / exit_cap ≈ exit value)?
+    Used to accept a Tier-1 operating-model NOI only when it's the CONSOLIDATED
+    deal NOI — a component-only row (e.g. one asset's income) won't reconcile."""
+    ec, ev = canonical.get("exit_cap"), canonical.get("exit_value")
+    if not (ec and ev and noi_terminal):
+        return None
+    c, v = float(ec["value"]), float(ev["value"])
+    cf = c / 100.0 if c > 1.5 else c
+    if cf <= 0:
+        return None
+    return abs(noi_terminal / cf - v) / max(abs(v), 1e-9) <= 0.15
 
 
 def _operating_from_stream(oracle: dict, canonical: dict, hold: dict | None) -> dict | None:
@@ -336,11 +433,16 @@ def _operating_from_stream(oracle: dict, canonical: dict, hold: dict | None) -> 
 
 
 def operating_trajectory(m: dict, tables: list[dict], oracle: dict,
-                         canonical: dict, hold: dict | None) -> dict:
+                         canonical: dict, hold: dict | None, file_path: Path) -> dict:
     """Operating NOI/revenue/opex with explicit provenance per the tier policy:
     operating model first; else derive from the unlevered stream; else fall back
     to the summary point (formula-traced + reconciled), clearly labelled."""
-    out = _operating_tier1(m, tables)
+    out = _operating_tier1(m, tables, file_path)
+    # Reconcile guard: a Tier-1 NOI is only trusted if it ties to the deal exit.
+    # A component-only NOI (one asset of a mixed-use deal) won't reconcile — drop
+    # it so the consolidated stream-derived NOI (Tier 1b) wins instead.
+    if "noi" in out and _noi_reconciles(out["noi"].get("terminal"), canonical) is False:
+        out.pop("noi")
     if "noi" not in out:                          # Tier 1b — derive NOI from the stream
         derived = _operating_from_stream(oracle, canonical, hold)
         if derived:
@@ -763,7 +865,7 @@ def build_deal_truth(file_path: str | Path) -> dict[str, Any]:
             "provenance": gross.get("provenance"), "conflict": False}
 
     # Tiered operating trajectory (needs sale_price to back the sale out in 1b).
-    ops = operating_trajectory(m, tables, oracle, canonical, hold)
+    ops = operating_trajectory(m, tables, oracle, canonical, hold, file_path)
 
     # Going-in cap: explicit if present, else the derived entry yield on cost.
     if "going_in_cap" not in canonical:
