@@ -1732,11 +1732,35 @@ def _render_model_brief(batch_id) -> None:
     with st.container(border=True):
         st.markdown("#### Deal Brief")
         st.caption("Read from " + ", ".join(brief.get("sheets_read", []) or ["—"]))
+        # Non-negotiables FIRST, deterministic + always complete — never rely on
+        # the GPT narrative to surface them. Every required fact shows a value or
+        # an explicit "not found".
+        dt = _ensure_deal_truth(batch_id)
+        if dt and not dt.get("error") and dt.get("brief_facts"):
+            _render_nonnegotiables_md(dt)
+            st.divider()
         st.markdown(final_md or "_(empty)_")
 
     if scored is not None:
         _render_investment_view(batch_id, brief, scored)
         _render_trust_panel(scored)
+
+
+def _render_nonnegotiables_md(dt: dict) -> None:
+    """The required deal facts — acquisition cost / going-in cap, total cost,
+    LTV·debt·equity, hold period, sales price, exit cap, and returns (levered +
+    unlevered IRR & EM). Deterministic and ALWAYS complete: every item shows a
+    value (✅ when cash-flow-validated) or an explicit 'not found'."""
+    lines = ["**Non-negotiables** — reconstructed & validated from the cash flow"]
+    for b in dt.get("brief_facts", []):
+        if not b.get("found"):
+            lines.append(f"- {b['label']}: _not found_")
+            continue
+        cf = " ✅" if b.get("cf_validated") else ""
+        note = f" — _{b['note']}_" if b.get("note") else ""
+        lines.append(f"- **{b['label']}:** {b['display']}{cf} "
+                     f"`{b.get('source','')}`{note}")
+    st.markdown("\n".join(lines))
 
 
 def _ensure_deal_truth(batch_id) -> dict | None:
@@ -1816,25 +1840,14 @@ def _fmt_canon(concept: str, v) -> str:
 
 
 def _render_deal_truth_panel(dt: dict) -> None:
-    """The canonical deal — reconstructed from the cash flow and validated. This
-    is the authoritative fact set: returns recomputed from the stream, sources
-    reconciled, conflicts disclosed, and the guardrails that bind the narrative."""
+    """Validation detail behind the brief's non-negotiables: deal type + engine,
+    the NOI trajectory provenance, the identity checks that confirm the deal hangs
+    together, and the guardrails that bind the narrative. (The non-negotiable
+    facts themselves are rendered in the Deal Brief above.)"""
     with st.container(border=True):
-        st.markdown("#### Deal Truth — validated from the cash flow")
+        st.markdown("#### Deal Truth — validation detail")
         st.caption(f"Deal type: **{dt.get('deal_type','?')}** · cash-flow engine: "
                    f"`{dt.get('cashflow_engine') or '—'}`")
-        # The non-negotiable brief set (all cash-flow-sourced), each with source.
-        lines = []
-        for b in dt.get("brief_facts", []):
-            if not b.get("found"):
-                lines.append(f"- **{b['label']}:** _not found_")
-                continue
-            note = f" — _{b['note']}_" if b.get("note") else ""
-            cf = " ✅ _cash-flow validated_" if b.get("cf_validated") else ""
-            lines.append(f"- **{b['label']}:** {b['display']} "
-                         f"`{b.get('source','')}`{cf}{note}")
-        if lines:
-            st.markdown("\n".join(lines))
 
         op = (dt.get("operating_series") or {}).get("noi") or {}
         if op.get("provenance"):
