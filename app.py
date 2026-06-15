@@ -206,7 +206,14 @@ _SESSION_DEFAULTS: dict = {
     # --- Finalized brief (step 4): narrative regenerated from verified facts ---
     "finalized_brief":       None,
     "finalized_brief_batch": None,
+    # --- Deal Truth (deal_truth.py): canonical facts reconstructed + validated
+    # from the cash flow; the source of truth Layer 3 + chat now read from. ---
+    "deal_truth":            None,
+    "deal_truth_batch":      None,
     # --- Deal Analyzer 3-column frontend (deal_review) ---
+    # Batch whose deal context has been seeded into the chat agent's history
+    # (so follow-up Q&A is grounded in THIS model, not answered generically).
+    "agent_grounded_batch": None,
     # Findings folded into the Outcome (middle column) from the chat / deep-dives.
     # Shape: list of {"id": str, "title": str, "content": str}
     "outcome_findings":   [],
@@ -798,6 +805,12 @@ def _render_deal_analyzer(agent: AgentSession) -> None:
     confirmed = bool(batch_id) and batch_id in st.session_state.aam_confirmed_batches
     analysis_req = bool(batch_id) and batch_id in st.session_state.aam_analysis_requested
 
+    # Once facts are confirmed, the underwriting layer is in SSOT — ground the
+    # chat agent in this deal so follow-up Q&A reads THIS model (not generic
+    # answers). Cheap + idempotent (seeds once per batch).
+    if confirmed:
+        _ensure_agent_grounded(agent, batch_id)
+
     left, mid, right = st.columns([1.1, 2.3, 1.5], gap="large")
 
     # Left renders in TWO phases: the upload + extraction progress must run
@@ -1039,6 +1052,83 @@ def _fold_to_outcome(content: str) -> None:
         "id": sig, "title": _finding_title(content), "content": content,
     })
     st.session_state.outcome_added.add(sig)
+
+
+def _ensure_agent_grounded(agent: AgentSession, batch_id) -> None:
+    """Seed the Deal Analyzer chat agent ONCE per confirmed batch with the deal
+    it's looking at — the files, the verified SSOT facts, and how to answer.
+
+    Without this the agent only has its system prompt: it doesn't know a model
+    is loaded, so a question like "what is exit price?" gets a generic textbook
+    definition instead of THIS deal's number. (The legacy scenarios get this via
+    _seed_agent_history; deal_review returns before that runs, so it needs its
+    own seed.) Injected as a `system` message so it grounds the model WITHOUT
+    showing up as a chat bubble — display_messages() skips system + tool roles."""
+    if st.session_state.get("agent_grounded_batch") == batch_id:
+        return
+    files = sorted(st.session_state.uploaded_filenames)
+    if not files:
+        return
+
+    # The verified facts the Outcome is built from (same source as the AAM
+    # summary / report) — so the agent can answer most questions directly and
+    # knows whether a metric like exit price is even in the model.
+    s = ssot.load_ssot()
+    uw = ((s.get("layers", {}) or {}).get("underwriting", {}) or {})
+    bm = uw.get("bounded_metrics", {}) or {}
+    fact_lines: list[str] = []
+    for name, rec in bm.items():
+        disp = rec.get("display_value")
+        if disp in (None, "", "—"):
+            continue
+        sheet, cell = rec.get("source_sheet"), rec.get("source_cell")
+        src = f" ({sheet}!{cell})" if sheet and cell else (f" ({sheet})" if sheet else "")
+        flag = "" if rec.get("status") == "verified" else " [unverified]"
+        fact_lines.append(f"- {rec.get('metric_name', name)}: {disp}{src}{flag}")
+    facts_block = "\n".join(fact_lines) if fact_lines else "(no metrics resolved yet)"
+
+    # Canonical deal truth (validated from the cash flow) + the guardrails that
+    # bind what may be asserted. This is the authoritative fact set; it overrides
+    # the brief facts where they differ.
+    truth_block, guard_block = "", ""
+    dt = _ensure_deal_truth(batch_id)
+    if dt and not dt.get("error"):
+        tl = []
+        for c, info in (dt.get("canonical") or {}).items():
+            mark = " [CONFLICT — disclose]" if info.get("conflict") else ""
+            tl.append(f"- {_DT_LABELS.get(c, c)}: {_fmt_canon(c, info['value'])} "
+                      f"({info.get('source','')}){mark}")
+        h = dt.get("hold")
+        if h and h.get("months"):
+            early = (f" (sells at month {h['months']} of a {h['model_months']}-month "
+                     "model — use the hold, not the model length)"
+                     if h.get("sells_before_model_end") else "")
+            tl.append(f"- Hold period: {h['months']} months / {h['years']:g} years{early}")
+        if tl:
+            truth_block = ("\n\nCANONICAL DEAL TRUTH (validated from the cash flow — "
+                           "PREFER these over any other source):\n" + "\n".join(tl))
+        grs = dt.get("guardrails") or []
+        if grs:
+            guard_block = ("\n\nBINDING CONSTRAINTS — obey every one; never contradict them:\n"
+                           + "\n".join(f"- {g['message']}" for g in grs))
+
+    context = (
+        "DEAL CONTEXT — the deal under review is already loaded; do NOT call "
+        "ingest_to_ssot or run_deal_review again, that work is done.\n"
+        f"Uploaded & ingested file(s): {', '.join(files)}.\n"
+        f"SSOT layers present: {ssot.list_layers()}.\n\n"
+        f"Verified facts in the underwriting layer:\n{facts_block}"
+        f"{truth_block}{guard_block}\n\n"
+        "Answering rules: when the user names a metric or concept (e.g. \"what is "
+        "exit price?\", \"cap rate?\", \"DSCR?\", \"exit cap?\") they mean THIS "
+        "deal — answer with the value from the facts above, or read the model with "
+        "get_layer_details / read_sheet / search_file. NEVER reply with a generic "
+        "textbook definition unless the user explicitly asks what a term means. If "
+        "a value genuinely isn't in the model after you've looked, say so plainly "
+        "and name where you looked."
+    )
+    agent.messages.append({"role": "system", "content": context})
+    st.session_state.agent_grounded_batch = batch_id
 
 
 def _render_chat_column(agent: AgentSession, suggestions: bool = False) -> None:
@@ -1649,15 +1739,49 @@ def _render_model_brief(batch_id) -> None:
         _render_trust_panel(scored)
 
 
+def _ensure_deal_truth(batch_id) -> dict | None:
+    """Reconstruct the canonical deal from the cash flow (deal_truth.py) once per
+    batch. Deterministic, no GPT. Cached in session — this is the validated fact
+    spine Layer 3 and the chat read from."""
+    if (st.session_state.get("deal_truth_batch") == batch_id
+            and st.session_state.get("deal_truth")):
+        return st.session_state.deal_truth
+    files = sorted(st.session_state.uploaded_filenames)
+    if not files:
+        return None
+    from deal_truth import build_deal_truth
+    with st.spinner("Reconstructing the deal from the cash flow (validate returns · reconcile sources)…"):
+        try:
+            dt = build_deal_truth(UPLOAD_DIR / files[0])
+        except Exception as e:
+            dt = {"error": f"{type(e).__name__}: {e}"}
+    st.session_state.deal_truth = dt
+    st.session_state.deal_truth_batch = batch_id
+    return dt
+
+
 def _ensure_investment_view(batch_id, brief: dict, scored: dict) -> dict:
     """Layer 3 — compute the deal analytics and write the Initial View once per
-    batch (cached in session). Reasons only over verified facts."""
+    batch (cached in session). Reasons over the canonical deal-truth facts
+    (validated against the cash flow) when available, and is BOUND by the
+    deal-truth guardrails; falls back to the brief's verified facts otherwise."""
     if (st.session_state.get("investment_view_batch") == batch_id
             and st.session_state.get("investment_view")):
         return st.session_state.investment_view
     from investment_intel import build_investment_view
+
+    facts = list(scored.get("facts") or [])
+    guardrails = None
+    dt = _ensure_deal_truth(batch_id)
+    if dt and not dt.get("error"):
+        from deal_truth import to_intel_facts, guardrail_lines
+        # canonical (validated) facts FIRST: Layer 3 takes the first fact per
+        # concept, so they win over the thinner brief facts.
+        facts = to_intel_facts(dt) + facts
+        guardrails = guardrail_lines(dt)
     try:
-        view = build_investment_view(scored, brief.get("identity"))
+        view = build_investment_view({"facts": facts}, brief.get("identity"),
+                                     guardrails=guardrails)
     except Exception as e:
         view = {"view_md": "", "analytics": {}, "llm": False, "error": str(e)}
     st.session_state.investment_view = view
@@ -1665,9 +1789,79 @@ def _ensure_investment_view(batch_id, brief: dict, scored: dict) -> dict:
     return view
 
 
+_DT_LABELS = {
+    "total_cost": "Total cost", "purchase_price": "Purchase price", "debt": "Debt",
+    "equity": "Equity", "ltc": "LTC", "ltv": "LTV", "exit_cap": "Exit cap",
+    "exit_value": "Exit value", "noi": "Stabilized NOI", "yield_on_cost": "Yield on cost",
+    "levered_irr": "Levered IRR", "unlevered_irr": "Unlevered IRR",
+    "equity_multiple": "Equity multiple", "debt_service": "Debt service",
+    "interest_rate": "Interest rate", "dscr": "DSCR", "debt_yield": "Debt yield",
+    "revenue": "Revenue",
+}
+_DT_RATE = {"exit_cap", "ltc", "ltv", "levered_irr", "unlevered_irr", "yield_on_cost",
+            "interest_rate", "debt_yield"}
+_DT_MULT = {"equity_multiple", "dscr"}
+
+
+def _fmt_canon(concept: str, v) -> str:
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    if concept in _DT_RATE:
+        return f"{v * 100:.2f}%" if abs(v) <= 1.5 else f"{v:.2f}%"
+    if concept in _DT_MULT:
+        return f"{v:.2f}x"
+    return f"${v:,.0f}"
+
+
+def _render_deal_truth_panel(dt: dict) -> None:
+    """The canonical deal — reconstructed from the cash flow and validated. This
+    is the authoritative fact set: returns recomputed from the stream, sources
+    reconciled, conflicts disclosed, and the guardrails that bind the narrative."""
+    with st.container(border=True):
+        st.markdown("#### Deal Truth — validated from the cash flow")
+        st.caption(f"Deal type: **{dt.get('deal_type','?')}** · cash-flow engine: "
+                   f"`{dt.get('cashflow_engine') or '—'}`")
+        # The non-negotiable brief set (all cash-flow-sourced), each with source.
+        lines = []
+        for b in dt.get("brief_facts", []):
+            if not b.get("found"):
+                lines.append(f"- **{b['label']}:** _not found_")
+                continue
+            note = f" — _{b['note']}_" if b.get("note") else ""
+            lines.append(f"- **{b['label']}:** {b['display']} "
+                         f"`{b.get('source','')}`{note}")
+        if lines:
+            st.markdown("\n".join(lines))
+
+        op = (dt.get("operating_series") or {}).get("noi") or {}
+        if op.get("provenance"):
+            gi, tm = op.get("going_in"), op.get("terminal")
+            if isinstance(gi, (int, float)) and isinstance(tm, (int, float)):
+                st.caption(f"NOI trajectory: ${gi:,.0f} → ${tm:,.0f} "
+                           f"(source: {op['provenance']})")
+
+        ids = dt.get("identities", [])
+        checked = [i for i in ids if i.get("checked")]
+        if checked:
+            marks = " · ".join(f"{'✓' if i['passed'] else '✗'} {i['name']}" for i in checked)
+            st.caption("Identity checks: " + marks)
+
+        grs = dt.get("guardrails", [])
+        if grs:
+            with st.expander(f"⚖ Guardrails ({len(grs)}) — what the write-up may NOT claim"):
+                for g in grs:
+                    st.markdown(f"- {g['message']}")
+
+
 def _render_investment_view(batch_id, brief: dict, scored: dict) -> None:
-    """The Initial View: what the verified facts MEAN — return composition, value
-    creation, leverage risk, what breaks the deal. Reasoning, not filler."""
+    """The Deal Truth panel (canonical, validated facts) + the Initial View: what
+    those facts MEAN — return composition, value creation, leverage, what breaks
+    it. Reasoning, not filler — and bound by the deal-truth guardrails."""
+    dt = _ensure_deal_truth(batch_id)
+    if dt and not dt.get("error"):
+        _render_deal_truth_panel(dt)
     view = _ensure_investment_view(batch_id, brief, scored)
     md = (view or {}).get("view_md")
     if not md:

@@ -90,6 +90,11 @@ and you have tools to read them. Identify the right sheet (use list_sheets
 if needed) and call read_sheet on it.
 
 Behavior rules:
+- A model is loaded. When the user names a metric or concept ("what is exit
+  price?", "cap rate?", "DSCR?", "exit cap?"), they mean THIS deal — answer with
+  the deal's number from SSOT (get_layer_details) or by reading the model
+  (read_sheet / search_file). NEVER reply with a generic textbook definition
+  unless the user explicitly asks what a term means in general.
 - If a user uploads files that aren't an acquisition underwriting model
   (e.g. financial statements only), tell them Deal Review needs an
   underwriting file, and suggest the Performance Analysis scenario for
@@ -236,7 +241,19 @@ class AgentSession:
 
             # No tool calls → this is the final reply.
             if not msg.tool_calls:
-                return msg.content or ""
+                final = (msg.content or "").strip()
+                if not final:
+                    # An empty final turn (some models do this after tool use, or
+                    # when they "give up") would replay as a BLANK chat bubble,
+                    # since display_messages() skips empty content. Substitute a
+                    # visible fallback and store it so the transcript matches.
+                    final = (
+                        "I couldn't pull that from the model. Try naming the "
+                        "metric or the sheet (e.g. \"exit price\", \"Exit Calcs\"), "
+                        "and I'll read it from the workbook."
+                    )
+                    assistant_record["content"] = final
+                return final
 
             # Execute each tool call and append the result.
             for tc in msg.tool_calls:
