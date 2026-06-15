@@ -1830,8 +1830,9 @@ def _render_deal_truth_panel(dt: dict) -> None:
                 lines.append(f"- **{b['label']}:** _not found_")
                 continue
             note = f" — _{b['note']}_" if b.get("note") else ""
+            cf = " ✅ _cash-flow validated_" if b.get("cf_validated") else ""
             lines.append(f"- **{b['label']}:** {b['display']} "
-                         f"`{b.get('source','')}`{note}")
+                         f"`{b.get('source','')}`{cf}{note}")
         if lines:
             st.markdown("\n".join(lines))
 

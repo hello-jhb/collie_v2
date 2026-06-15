@@ -515,13 +515,12 @@ def _canonical_for_concept(concept: str, cands: list[dict],
             g["referenced"] = True
     reps = [(g["rep"], g["referenced"]) for g in groups_by_src.values()]
 
-    # Distinct magnitudes (beyond tolerance) = a real conflict.
+    # Distinct magnitudes (beyond tolerance).
     mags: list[float] = []
     for rep, _ in reps:
         v = float(rep["value"])
         if not any(abs(v - mm) / max(abs(v), abs(mm), 1e-9) <= _REL_TOL for mm in mags):
             mags.append(v)
-    conflict = len(mags) > 1
 
     pref = _SOURCE_PREF.get(concept, ("inputs", "summary", "returns", "model", "support"))
     rep_vals = [float(r["value"]) for r, _ in reps]
@@ -538,6 +537,16 @@ def _canonical_for_concept(concept: str, cands: list[dict],
         return (role_rank, -support(float(c["value"])), 0 if ref else 1, -abs(float(c["value"])))
 
     winner, _ = min(reps, key=rank)
+
+    # A conflict is real only if a competing value isn't the winner AND the
+    # competitors don't DECOMPOSE it: total equity = LP + GP, total cost = a sum
+    # of line items — a part-of-whole split, not a disagreement. Components are
+    # same-signed and smaller than the whole; they must sum to it.
+    w = float(winner["value"])
+    others = [mm for mm in mags if abs(mm - w) / max(abs(mm), abs(w), 1e-9) > _REL_TOL]
+    comps = [o for o in others if o * w > 0 and abs(o) < abs(w)]
+    part_of_whole = bool(comps) and abs(sum(comps) - w) / max(abs(w), 1e-9) <= _REL_TOL
+    conflict = bool(others) and not part_of_whole
     return {
         "concept": concept,
         "value": winner["value"],
@@ -699,6 +708,24 @@ def _run_identities(canonical: dict, oracle: dict, ops: dict) -> list[dict]:
                     "passed": approx(debt + equity, cost),
                     "detail": f"{debt:,.0f} + {equity:,.0f} vs {cost:,.0f}"})
 
+    # Cross-check the capital outlay against the cash flow ITSELF: total cost vs
+    # the cumulative outflows in the unlevered stream; acquisition cost vs the
+    # first-period outflow (land/purchase at close). Promotes a costed input to a
+    # cash-flow-validated fact when they agree.
+    unlev = oracle.get("unlevered")
+    flows = unlev.get("flows") if unlev else None
+    if flows and cost:
+        draws = -sum(v for _, v in flows if v < 0)
+        out.append({"name": "total_cost≈CF draws", "checked": True,
+                    "passed": approx(cost, draws),
+                    "detail": f"cost {cost:,.0f} vs unlevered outflows {draws:,.0f}"})
+    acq = val("purchase_price")
+    if flows and acq:
+        init = -min(v for _, v in flows)        # largest single outflow ~ acquisition/land
+        out.append({"name": "acq_cost≈initial outflow", "checked": True,
+                    "passed": approx(acq, init),
+                    "detail": f"acq {acq:,.0f} vs initial outflow {init:,.0f}"})
+
     # exit_value ≈ terminal NOI / exit_cap (fall back to the canonical NOI point
     # when no full trajectory was extractable — e.g. a development model where
     # the operating build-up doesn't align with the cash-flow date axis).
@@ -753,12 +780,14 @@ def deal_brief_facts(canonical: dict, oracle: dict, hold: dict | None,
 
     def item(label: str, concept: str, *, value=None, source=None, note=None):
         info = canonical.get(concept) if value is None else None
+        cf_val = bool(info and info.get("cf_validated"))
         if value is None and info is not None:
             value, source = info["value"], info.get("source")
         found = value is not None
         disp = _bfmt(concept, float(value)) if found else "— not found —"
         out.append({"label": label, "concept": concept, "found": found,
-                    "display": disp, "source": source, "note": note})
+                    "display": disp, "source": source, "note": note,
+                    "cf_validated": cf_val})
 
     item("Acquisition cost", "purchase_price")
     item("Going-in cap", "going_in_cap")
@@ -881,6 +910,12 @@ def build_deal_truth(file_path: str | Path) -> dict[str, Any]:
 
     deal_type = _infer_deal_type(oracle, ops)
     identities = _run_identities(canonical, oracle, ops)
+    # Promote a costed input to cash-flow-validated when it ties to the stream.
+    for ident_name, concept in (("total_cost≈CF draws", "total_cost"),
+                                ("acq_cost≈initial outflow", "purchase_price")):
+        idr = next((i for i in identities if i["name"] == ident_name), None)
+        if idr and idr.get("passed") and concept in canonical:
+            canonical[concept]["cf_validated"] = True
     guardrails = _build_guardrails(canonical, oracle, identities, ops, deal_type, m)
     brief_facts = deal_brief_facts(canonical, oracle, hold, ops)
 
@@ -912,8 +947,9 @@ def render_truth_text(d: dict) -> str:
          "=" * 78, "\nDEAL BRIEF — non-negotiables (all cash-flow-sourced)"]
     for b in d.get("brief_facts", []):
         miss = "" if b["found"] else "   ⟵ MISSING"
+        cf = " ✓CF" if b.get("cf_validated") else ""
         note = f"   ({b['note']})" if b.get("note") else ""
-        L.append(f"  {b['label']:<26} {b['display']:<16} {b.get('source') or ''}{note}{miss}")
+        L.append(f"  {b['label']:<26} {b['display']:<14}{cf:<5} {b.get('source') or ''}{note}{miss}")
     h = d.get("hold")
     if h and h.get("sells_before_model_end"):
         L.append(f"  ⚠ sells early: month {h['months']} of a {h['model_months']}-month model")
