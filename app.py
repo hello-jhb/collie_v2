@@ -1881,8 +1881,15 @@ def _ensure_finalized_brief(batch_id, brief: dict, scored: dict) -> dict:
             and st.session_state.get("finalized_brief")):
         return st.session_state.finalized_brief
     from model_brief import finalize_brief
+    # Feed the cash-flow-validated deal truth into the brief so its narrative
+    # asserts the validated numbers and obeys the guardrails (not just Layer 3).
+    canonical, guardrails = None, None
+    dt = _ensure_deal_truth(batch_id)
+    if dt and not dt.get("error"):
+        from deal_truth import to_intel_facts, guardrail_lines
+        canonical, guardrails = to_intel_facts(dt), guardrail_lines(dt)
     try:
-        result = finalize_brief(brief, scored)
+        result = finalize_brief(brief, scored, canonical=canonical, guardrails=guardrails)
     except Exception as e:
         result = {"brief_md": brief.get("brief_md", ""), "finalized": False,
                   "counts": {}, "error": str(e)}
