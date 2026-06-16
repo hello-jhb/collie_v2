@@ -911,6 +911,12 @@ def _derive_stack_from_spine(oracle: dict, canonical: dict) -> float:
     if unlev:
         setc("total_cost", -sum(v for _, v in unlev["flows"] if v < 0), unlev, "Σ unlevered outflows")
         setc("sale_price", max((v for _, v in unlev["flows"]), default=None), unlev, "terminal inflow")
+        # Acquisition cost = the largest single outflow (the asset purchase at
+        # close dwarfs monthly operating/construction flows). Derived from the
+        # stream, not a vocab-matched closing-cost line — fixes "$1.3M purchase".
+        mn = min((v for _, v in unlev["flows"]), default=0.0)
+        if mn < 0:
+            setc("purchase_price", -mn, unlev, "acquisition outflow (largest single)")
     return unlev.get("_scale", 1.0) if unlev else 1.0
 
 
