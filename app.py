@@ -210,6 +210,10 @@ _SESSION_DEFAULTS: dict = {
     # from the cash flow; the source of truth Layer 3 + chat now read from. ---
     "deal_truth":            None,
     "deal_truth_batch":      None,
+    # --- Integrated analysis (deal_analysis.py): one grounded analysis (capital
+    # structure / returns / cash flow-NOI / capex) shown in the Outcome. ---
+    "deal_analysis":         None,
+    "deal_analysis_batch":   None,
     # --- Deal Analyzer 3-column frontend (deal_review) ---
     # Batch whose deal context has been seeded into the chat agent's history
     # (so follow-up Q&A is grounded in THIS model, not answered generically).
@@ -1878,6 +1882,32 @@ def _render_deal_truth_panel(dt: dict) -> None:
                     st.markdown(f"- {g['message']}")
 
 
+def _render_integrated_analysis(batch_id, dt: dict) -> None:
+    """One integrated analysis — Capital Structure · Return Profile · Cash Flow /
+    NOI · CapEx — grounded in the validated spine + the full-read roll-up, in
+    place of the four separate GPT deep-dives. Deterministic, so it always loads.
+    Cached per batch."""
+    if not dt.get("engine_found", True):
+        return
+    cache = st.session_state.get("deal_analysis")
+    if not (st.session_state.get("deal_analysis_batch") == batch_id and cache):
+        files = sorted(st.session_state.uploaded_filenames)
+        if not files:
+            return
+        from deal_analysis import build_analysis
+        try:
+            with st.spinner("Building the integrated analysis…"):
+                cache = build_analysis(UPLOAD_DIR / files[0], dt=dt)
+        except Exception as e:
+            st.caption(f"Integrated analysis unavailable: {e}")
+            return
+        st.session_state.deal_analysis = cache
+        st.session_state.deal_analysis_batch = batch_id
+    if cache.get("md"):
+        with st.container(border=True):
+            st.markdown(cache["md"])
+
+
 def _render_investment_view(batch_id, brief: dict, scored: dict) -> None:
     """The Deal Truth panel (canonical, validated facts) + the Initial View: what
     those facts MEAN — return composition, value creation, leverage, what breaks
@@ -1885,6 +1915,7 @@ def _render_investment_view(batch_id, brief: dict, scored: dict) -> None:
     dt = _ensure_deal_truth(batch_id)
     if dt and not dt.get("error"):
         _render_deal_truth_panel(dt)
+        _render_integrated_analysis(batch_id, dt)
     # No validated engine → no facts to reason over; skip Layer 3 (it would be
     # filler) rather than narrate an un-reconstructed deal.
     if dt and not dt.get("engine_found", True):
