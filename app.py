@@ -1751,6 +1751,12 @@ def _render_nonnegotiables_md(dt: dict) -> None:
     LTV·debt·equity, hold period, sales price, exit cap, and returns (levered +
     unlevered IRR & EM). Deterministic and ALWAYS complete: every item shows a
     value (✅ when cash-flow-validated) or an explicit 'not found'."""
+    if not dt.get("engine_found", True):
+        st.warning("⚠ **Cash-flow engine not found.** No cash-flow stream "
+                   "reproduced the model's stated IRR, so the deal could **not** be "
+                   "reconstructed — nothing below is validated. "
+                   + (dt.get("reason") or ""))
+        return
     lines = ["**Non-negotiables** — reconstructed & validated from the cash flow"]
     for b in dt.get("brief_facts", []):
         if not b.get("found"):
@@ -1846,6 +1852,9 @@ def _render_deal_truth_panel(dt: dict) -> None:
     facts themselves are rendered in the Deal Brief above.)"""
     with st.container(border=True):
         st.markdown("#### Deal Truth — validation detail")
+        if not dt.get("engine_found", True):
+            st.caption("No validated cash-flow engine — see the notice above.")
+            return
         st.caption(f"Deal type: **{dt.get('deal_type','?')}** · cash-flow engine: "
                    f"`{dt.get('cashflow_engine') or '—'}`")
 
@@ -1876,6 +1885,10 @@ def _render_investment_view(batch_id, brief: dict, scored: dict) -> None:
     dt = _ensure_deal_truth(batch_id)
     if dt and not dt.get("error"):
         _render_deal_truth_panel(dt)
+    # No validated engine → no facts to reason over; skip Layer 3 (it would be
+    # filler) rather than narrate an un-reconstructed deal.
+    if dt and not dt.get("engine_found", True):
+        return
     view = _ensure_investment_view(batch_id, brief, scored)
     md = (view or {}).get("view_md")
     if not md:
