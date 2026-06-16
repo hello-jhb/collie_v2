@@ -82,7 +82,9 @@ _CONCEPT_VOCAB: list[tuple[str, tuple[str, ...]]] = [
     ("debt_yield",     ("debt yield",)),
     ("interest_rate",  ("interest rate", "all-in rate", "coupon", "fixed rate")),
     # --- operations ---
-    ("noi",            ("net operating income", "operating income", "noi")),
+    ("noi",            ("net operating income", "operating income", "noi",
+                        "income to owner", "gross operating income", "gross operating profit",
+                        "operating profit", "net operating cash flow")),
     ("revenue",        ("effective gross", "gross potential", "total revenue",
                         "total income", "rental income", "net revenue", "egi", "gpr")),
     ("opex",           ("operating expense", "total expense", "total opex", "opex")),
