@@ -938,15 +938,15 @@ def _render_outcome_column(agent: AgentSession, batch_id, confirmed: bool, analy
     )
     if brief_path:
         mb = st.session_state.model_brief or {}
-        with st.container(border=True):
-            st.markdown("#### Deal Brief")
+        # LEAD with the grounded analysis; the GPT narrative is tucked away.
+        _render_grounded_analysis(batch_id)
+        if st.session_state.trust_scored:
+            _render_initial_view(batch_id, mb, st.session_state.trust_scored)
+        with st.expander("📝 Narrative read (GPT comprehension)", expanded=False):
             fin = st.session_state.finalized_brief or {}
             st.markdown(fin.get("brief_md") or mb.get("brief_md", "_(empty)_"))
-        if st.session_state.trust_scored:
-            # Initial View (Layer 3) stays the hero post-confirm too. The view is
-            # cached per batch, so this reuses the pre-confirm computation.
-            _render_investment_view(batch_id, mb, st.session_state.trust_scored)
-            _render_trust_panel(st.session_state.trust_scored)
+            if st.session_state.trust_scored:
+                _render_trust_panel(st.session_state.trust_scored)
     else:
         _render_aam_summary()
         if analysis_req:
@@ -1639,46 +1639,34 @@ def _ensure_model_brief(batch_id) -> dict:
 
 
 def _render_model_brief(batch_id) -> None:
-    """Comprehension-first deal read, shown ABOVE the verification gate so the
-    analyst sees the deal before verifying facts (and so we can judge the
-    comprehension read against the reference Outcome). Read-only; no gating."""
+    """LEAD with the grounded analysis (deterministic deal_truth + roll-up — the
+    accurate, fast view). The GPT comprehension read runs in the background and is
+    tucked into a collapsed expander; the analysis above is authoritative."""
+    # 1. Grounded analysis first — no GPT extraction needed.
+    dt = _ensure_deal_truth(batch_id)
+    engine_ok = _render_grounded_analysis(batch_id, dt)
+
     from scenarios._llm import llm_available
     if not llm_available():
-        with st.container(border=True):
-            st.markdown("#### Model Brief")
-            st.caption("Set OPENAI_API_KEY to generate the comprehension read. "
-                       "The audit appendix below still works without it.")
         return
+    if not engine_ok:
+        return                            # engine-not-found notice already shown
+
+    # 2. GPT comprehension read + Layer 3 reasoning — secondary, below.
     brief = _ensure_model_brief(batch_id)
     if brief.get("error"):
-        with st.container(border=True):
-            st.markdown("#### Deal Brief")
-            st.caption(f"Couldn't generate the brief: {brief['error']}")
         return
-
-    # Verify the brief's facts, then regenerate the narrative so it asserts only
-    # verified facts ("no wrong data"). Both cached per batch.
     scored = _ensure_trust_scored(batch_id, brief)
-    final_md = brief.get("brief_md", "")
     if scored is not None:
-        finalized = _ensure_finalized_brief(batch_id, brief, scored)
-        final_md = finalized.get("brief_md") or final_md
-
-    with st.container(border=True):
-        st.markdown("#### Deal Brief")
+        _ensure_finalized_brief(batch_id, brief, scored)
+        _render_initial_view(batch_id, brief, scored)   # Layer 3
+    with st.expander("📝 Narrative read (GPT comprehension) — the analysis above "
+                     "is the authoritative, grounded version", expanded=False):
         st.caption("Read from " + ", ".join(brief.get("sheets_read", []) or ["—"]))
-        # Non-negotiables FIRST, deterministic + always complete — never rely on
-        # the GPT narrative to surface them. Every required fact shows a value or
-        # an explicit "not found".
-        dt = _ensure_deal_truth(batch_id)
-        if dt and not dt.get("error") and dt.get("brief_facts"):
-            _render_nonnegotiables_md(dt)
-            st.divider()
-        st.markdown(final_md or "_(empty)_")
-
-    if scored is not None:
-        _render_investment_view(batch_id, brief, scored)
-        _render_trust_panel(scored)
+        fin = st.session_state.get("finalized_brief") or {}
+        st.markdown(fin.get("brief_md") or brief.get("brief_md") or "_(empty)_")
+        if scored is not None:
+            _render_trust_panel(scored)
 
 
 def _render_nonnegotiables_md(dt: dict) -> None:
@@ -1839,18 +1827,27 @@ def _render_integrated_analysis(batch_id, dt: dict) -> None:
             st.markdown(cache["md"])
 
 
-def _render_investment_view(batch_id, brief: dict, scored: dict) -> None:
-    """The Deal Truth panel (canonical, validated facts) + the Initial View: what
-    those facts MEAN — return composition, value creation, leverage, what breaks
-    it. Reasoning, not filler — and bound by the deal-truth guardrails."""
-    dt = _ensure_deal_truth(batch_id)
-    if dt and not dt.get("error"):
-        _render_deal_truth_panel(dt)
-        _render_integrated_analysis(batch_id, dt)
-    # No validated engine → no facts to reason over; skip Layer 3 (it would be
-    # filler) rather than narrate an un-reconstructed deal.
-    if dt and not dt.get("engine_found", True):
-        return
+def _render_grounded_analysis(batch_id, dt=None) -> bool:
+    """LEAD with the deterministic, grounded analysis — the non-negotiables, the
+    Deal Truth panel, and the integrated analysis (Capital Structure / Returns /
+    Cash Flow-NOI / CapEx / Summary cross-check). No GPT extraction, so it's the
+    accurate, fast view. Returns whether a cash-flow engine was found."""
+    dt = dt if dt is not None else _ensure_deal_truth(batch_id)
+    if not dt or dt.get("error"):
+        return False
+    with st.container(border=True):
+        st.markdown("#### Deal Analysis")
+        if dt.get("brief_facts"):
+            _render_nonnegotiables_md(dt)
+    _render_deal_truth_panel(dt)
+    _render_integrated_analysis(batch_id, dt)
+    return dt.get("engine_found", True)
+
+
+def _render_initial_view(batch_id, brief: dict, scored: dict) -> None:
+    """Layer 3 — what the validated facts MEAN (return composition, value
+    creation, leverage, what breaks it), reasoned over the deal-truth facts and
+    bound by its guardrails."""
     view = _ensure_investment_view(batch_id, brief, scored)
     md = (view or {}).get("view_md")
     if not md:
