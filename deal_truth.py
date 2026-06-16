@@ -42,6 +42,7 @@ from typing import Any
 
 from workbook_map import build_workbook_map, _passes_domain, _concept_of
 from financial_model_parser import parse_workbook_tables_cached
+from cashflow_spine import find_spine
 
 log = logging.getLogger("fb.dealtruth")
 if not log.handlers:
@@ -239,7 +240,7 @@ def detect_hold(oracle: dict) -> dict | None:
         "sale_date": sale_date.isoformat(), "start_date": start.isoformat(),
         "model_months": model_months,
         "sells_before_model_end": months < model_months - 1,
-        "source": f"{stream['sheet']}!row{stream['row']} (sale period detected from cash flow)",
+        "source": f"{stream.get('loc') or stream.get('sheet')} (sale period detected from cash flow)",
     }
 
 
@@ -420,7 +421,17 @@ def _operating_from_stream(oracle: dict, canonical: dict, hold: dict | None) -> 
             break
     op = [(y, (v - sale_px if (sale_year and y == sale_year and sale_px) else v))
           for y, v in bylist]
-    pos = [(y, v) for y, v in op if v > 0]        # operating years (positive)
+    # Use only FULL operating years for the headline figures — a partial first/
+    # last calendar year (a mid-year start or sale) understates NOI. (For an
+    # annual stream every year is full, so this is a no-op there.)
+    yr_count: dict[int, int] = {}
+    for d, _ in stream["flows"]:
+        yr_count[d.year] = yr_count.get(d.year, 0) + 1
+    mx = max(yr_count.values(), default=1)
+    full = {y for y, c in yr_count.items() if c >= max(1, mx - 2)}
+    pos = [(y, v) for y, v in op if v > 0 and y in full]   # full operating years
+    if not pos:
+        pos = [(y, v) for y, v in op if v > 0]
     if not pos:
         return None
     return {
@@ -820,6 +831,109 @@ def deal_brief_facts(canonical: dict, oracle: dict, hold: dict | None,
 # Orchestration
 # ---------------------------------------------------------------------------
 
+def _oracle_from_spine(spine) -> dict:
+    """Adapt the validated spine streams into the oracle shape the rest of the
+    pipeline consumes (hold detection, operating derivation, returns). The spine
+    is the authoritative source — these streams already reproduced the stated IRR."""
+    matched = dict(spine.matched)
+    if "levered" not in matched and "primary" in matched:
+        matched["levered"] = matched.pop("primary")
+    out: dict[str, Any] = {"levered": None, "unlevered": None, "candidates": []}
+    for leg in ("levered", "unlevered"):
+        m = matched.get(leg)
+        if not m:
+            continue
+        entry = {
+            "sheet": m["sheet"], "row": m.get("loc"), "loc": m.get("loc"), "label": m["label"],
+            "recomputed_irr": m["recomputed_irr"], "recomputed_em": m["recomputed_em"],
+            "stated_irr": m["stated_irr"], "validated": True,
+            "match_err_bps": m["match_err_bps"], "initial_outflow": m["initial_outflow"],
+            "flows": m["flows"], "periodicity": m.get("periodicity"),
+        }
+        out[leg] = entry
+        # candidate carries the leg as its label so _operating_from_stream can find it
+        out["candidates"].append({**entry, "label": leg, "xirr": m["recomputed_irr"],
+                                  "em": m["recomputed_em"]})
+    return out
+
+
+def _nearest_pow10(x: float) -> float:
+    import math
+    if x <= 0:
+        return 1.0
+    return float(10 ** round(math.log10(x)))
+
+
+def _derive_stack_from_spine(oracle: dict, canonical: dict) -> float:
+    """Rule 8: the capital stack / cost / sale come FROM the validated streams,
+    not vocab-matched summary cells. First detect the streams' DOLLAR SCALE from
+    the debt anchor (loan amounts are stated in full dollars: scale ≈ debt /
+    (cost − equity), since debt + equity = cost) and SCALE THE FLOWS in place —
+    so every downstream dollar derivation (stack, NOI, sale-backout, identities)
+    is in full dollars and internally consistent. Then derive:
+    equity = Σ levered outflows; total cost = Σ unlevered outflows; sale =
+    terminal inflow. Returns the scale applied."""
+    lev, unlev = oracle.get("levered"), oracle.get("unlevered")
+    legs = [s for s in (lev, unlev) if s]
+    if not legs:
+        return 1.0
+    # Streams can be in DIFFERENT units (one tab in $, another in $000s). Detect
+    # each stream's scale against a common deal-sized reference: the largest of
+    # the debt anchor and the streams' own peak magnitudes. A stream ~1000x below
+    # that reference is in thousands.
+    debt = float(canonical["debt"]["value"]) if "debt" in canonical else 0.0
+    peaks = {id(s): max((abs(v) for _, v in s["flows"]), default=0.0) for s in legs}
+    ref = max([debt] + list(peaks.values()))
+
+    for s in legs:
+        peak = peaks[id(s)] or 1.0
+        sc = _nearest_pow10(ref / peak)
+        sc = sc if sc in (1.0, 1e3, 1e6) else 1.0
+        s["_scale"] = sc
+        if sc != 1.0:
+            s["flows"] = [(d, v * sc) for d, v in s["flows"]]
+            if s.get("initial_outflow") is not None:
+                s["initial_outflow"] *= sc
+    # rebuild candidates from the (now-scaled) leg streams so operating derivation
+    # uses the same scaled flows.
+    oracle["candidates"] = [{**s, "label": name}
+                            for name, s in (("levered", lev), ("unlevered", unlev)) if s]
+
+    def setc(concept, raw, leg, label):
+        if raw is None:
+            return
+        canonical[concept] = {
+            "concept": concept, "value": raw,
+            "source": f"{leg['loc']} ({label})", "method": "recomputed",
+            "validated": True, "conflict": False, "cf_validated": True}
+    if lev:
+        setc("equity", -sum(v for _, v in lev["flows"] if v < 0), lev, "Σ equity outflows")
+    if unlev:
+        setc("total_cost", -sum(v for _, v in unlev["flows"] if v < 0), unlev, "Σ unlevered outflows")
+        setc("sale_price", max((v for _, v in unlev["flows"]), default=None), unlev, "terminal inflow")
+    return unlev.get("_scale", 1.0) if unlev else 1.0
+
+
+def _engine_not_found(file_path: Path, spine) -> dict[str, Any]:
+    """Honest result when the cash-flow engine can't be identified (rule 9): no
+    reconstructed numbers, an explicit reason, and the non-negotiables all 'not
+    found'. Downstream must NOT present anything as validated."""
+    reason = spine.diagnostics.get("reason") or (
+        "No cash-flow stream reproduced the model's stated IRR — the engine "
+        "could not be identified. Numbers were NOT reconstructed.")
+    return {
+        "version": DEAL_TRUTH_VERSION, "file": file_path.name,
+        "ok": False, "engine_found": False, "reason": reason,
+        "deal_type": "unknown", "cashflow_engine": None, "hold": None,
+        "canonical": {}, "brief_facts": deal_brief_facts({}, {}, None, {}),
+        "operating_series": {}, "oracle": {}, "identities": [],
+        "guardrails": [{"code": "engine_not_found", "message": reason,
+                        "evidence": spine.diagnostics}],
+        "spine": {"ok": False, "stated_irrs": len(spine.stated_irrs),
+                  "candidate_streams": spine.n_candidate_streams},
+    }
+
+
 def build_deal_truth(file_path: str | Path) -> dict[str, Any]:
     file_path = Path(file_path)
     m = build_workbook_map(file_path)
@@ -831,7 +945,18 @@ def build_deal_truth(file_path: str | Path) -> dict[str, Any]:
         tables = []
         log.error("table parse failed: %s", e)
 
-    oracle = run_oracle(m, tables)
+    # The spine is the anchor: find the one true cash-flow stream by matching its
+    # recomputed IRR to the model's stated IRR (rules 1-7). If none validates,
+    # the engine wasn't found — do NOT reconstruct (rules 6, 9).
+    spine = find_spine(file_path)
+    if not spine.ok:
+        return _engine_not_found(file_path, spine)
+    oracle = _oracle_from_spine(spine)
+    # The engine's anchor sheet (the build-up usually lives with the unlevered
+    # stream) becomes the cash-flow engine the operating reader prefers.
+    anchor = (oracle.get("unlevered") or oracle.get("levered") or {}).get("sheet")
+    if anchor:
+        m["cashflow_engine"] = anchor
     hold = detect_hold(oracle)
 
     # Cells that some display cell formula-traces to — i.e. inputs the model
@@ -859,39 +984,43 @@ def build_deal_truth(file_path: str | Path) -> dict[str, Any]:
     if oracle.get("levered"):
         canonical["levered_irr"] = {
             "concept": "levered_irr", "value": oracle["levered"]["recomputed_irr"],
-            "source": f"{oracle['levered']['sheet']}!row{oracle['levered']['row']} (XIRR)",
+            "source": f"{oracle['levered']['loc']} (XIRR)",
             "method": "recomputed", "validated": oracle["levered"]["validated"],
             "conflict": False}
         if oracle["levered"].get("recomputed_em") is not None:
             canonical["equity_multiple"] = {
                 "concept": "equity_multiple", "value": oracle["levered"]["recomputed_em"],
-                "source": f"{oracle['levered']['sheet']}!row{oracle['levered']['row']} (ΣCF)",
-                "method": "recomputed",
+                "source": f"{oracle['levered']['loc']} (ΣCF)", "method": "recomputed",
                 "validated": oracle["levered"]["validated"], "conflict": False}
     if oracle.get("unlevered"):
         canonical["unlevered_irr"] = {
             "concept": "unlevered_irr", "value": oracle["unlevered"]["recomputed_irr"],
-            "source": f"{oracle['unlevered']['sheet']}!row{oracle['unlevered']['row']} (XIRR)",
+            "source": f"{oracle['unlevered']['loc']} (XIRR)",
             "method": "recomputed", "validated": oracle["unlevered"]["validated"],
             "conflict": False}
         if oracle["unlevered"].get("recomputed_em") is not None:
             canonical["unlevered_equity_multiple"] = {
                 "concept": "unlevered_equity_multiple",
                 "value": oracle["unlevered"]["recomputed_em"],
-                "source": f"{oracle['unlevered']['sheet']}!row{oracle['unlevered']['row']} (ΣCF)",
-                "method": "recomputed",
+                "source": f"{oracle['unlevered']['loc']} (ΣCF)", "method": "recomputed",
                 "validated": oracle["unlevered"]["validated"], "conflict": False}
 
-    # Sales price = GROSS terminal value (the largest exit candidate); canonical
-    # exit_value stays the net proceeds. Both surfaced.
-    ev_cands = [e for e in m["candidates"].get("exit_value", [])
-                if _passes_domain("exit_value", e["value"])]
-    if ev_cands:
-        gross = max(ev_cands, key=lambda e: float(e["value"]))
-        canonical["sale_price"] = {
-            "concept": "sale_price", "value": float(gross["value"]),
-            "source": (gross.get("provenance") or {}).get("source") or gross["display"],
-            "provenance": gross.get("provenance"), "conflict": False}
+    # Rule 8: derive the capital stack / cost / sale FROM the validated stream
+    # (engine wins over vocab-matched summary cells), detecting the stream's
+    # dollar scale so mixed-unit models report full dollars.
+    stack_scale = _derive_stack_from_spine(oracle, canonical)
+
+    # Sales price comes from the stream (above). Only fall back to a vocab exit
+    # candidate if the stream didn't yield one.
+    if "sale_price" not in canonical:
+        ev_cands = [e for e in m["candidates"].get("exit_value", [])
+                    if _passes_domain("exit_value", e["value"])]
+        if ev_cands:
+            gross = max(ev_cands, key=lambda e: float(e["value"]))
+            canonical["sale_price"] = {
+                "concept": "sale_price", "value": float(gross["value"]),
+                "source": (gross.get("provenance") or {}).get("source") or gross["display"],
+                "provenance": gross.get("provenance"), "conflict": False}
 
     # Tiered operating trajectory (needs sale_price to back the sale out in 1b).
     ops = operating_trajectory(m, tables, oracle, canonical, hold, file_path)
@@ -922,6 +1051,9 @@ def build_deal_truth(file_path: str | Path) -> dict[str, Any]:
     result = {
         "version": DEAL_TRUTH_VERSION,
         "file": file_path.name,
+        "ok": True,
+        "engine_found": True,
+        "spine_anchor": spine.diagnostics.get("anchor_sheets"),
         "deal_type": deal_type,
         "cashflow_engine": m.get("cashflow_engine"),
         "hold": hold,
