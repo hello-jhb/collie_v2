@@ -177,7 +177,19 @@ def build_analysis(file_path: str | Path, dt: dict | None = None) -> dict[str, A
         cp.append("_No CapEx / reserve line identified._")
     sections["capex"] = "\n".join(cp)
 
-    order = ["capital_structure", "return_profile", "cash_flow", "capex"]
+    # --- Summary cross-check (engine vs the model's headline) -------------
+    sc_rows = dt.get("summary_check", [])
+    if sc_rows:
+        sx = ["#### Summary Cross-Check — engine vs the model's headline"]
+        for r in sc_rows:
+            ev = _pct(r["engine"]) if r["kind"] == "rate" else _money(r["engine"])
+            sv = _pct(r["summary"]) if r["kind"] == "rate" else _money(r["summary"])
+            mark = "✓" if r["match"] else "✗ **mismatch — engine wins**"
+            sx.append(f"- **{r['label']}:** engine {ev} vs summary {sv} {mark} "
+                      f"`{r.get('source','')}`")
+        sections["summary_check"] = "\n".join(sx)
+
+    order = ["capital_structure", "return_profile", "cash_flow", "capex", "summary_check"]
     md = "### Deal Analysis — grounded in the cash-flow model\n\n" + \
         "\n\n".join(sections[k] for k in order if k in sections)
     return {"ok": True, "md": md, "sections": sections, "dt": dt}

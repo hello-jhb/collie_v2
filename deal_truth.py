@@ -951,6 +951,59 @@ def _engine_not_found(file_path: Path, spine) -> dict[str, Any]:
     }
 
 
+def _summary_reconciliation(m: dict, canonical: dict, oracle: dict,
+                            file_path: Path) -> list[dict]:
+    """Cross-check each engine-derived non-negotiable against the value the SUMMARY
+    actually displays — the model's own headline. Returns rows {label, engine,
+    summary, match, source}; the engine wins, mismatches are surfaced. Summary
+    candidates are scaled by their sheet's declared units so the comparison is
+    apples-to-apples, and only deal-sized candidates (within 5x of the engine)
+    count as 'what the summary shows' — a stray $1.3M line is not a competing
+    headline."""
+    from cashflow_spine import _load_grids, sheet_scale
+    try:
+        scales = {s: sheet_scale(g) for s, g in _load_grids(Path(file_path)).items()}
+    except Exception:
+        scales = {}
+    rows: list[dict] = []
+
+    # Returns: recomputed (engine) vs stated (summary) — the spine already proved
+    # these match; surface it explicitly.
+    for leg in ("levered", "unlevered"):
+        o = oracle.get(leg)
+        if o:
+            rows.append({"label": f"{leg.title()} IRR", "engine": o["recomputed_irr"],
+                         "summary": o["stated_irr"], "kind": "rate",
+                         "match": abs(o["recomputed_irr"] - o["stated_irr"]) <= _IRR_TOL,
+                         "source": o.get("stated_cell", "stated")})
+
+    _MONEY = {"total_cost", "debt", "equity", "sale_price", "purchase_price"}
+    _LABELS = {"total_cost": "Total cost", "debt": "Debt", "equity": "Equity",
+               "purchase_price": "Acquisition cost", "sale_price": "Sale price",
+               "exit_cap": "Exit cap"}
+    for concept, lab in _LABELS.items():
+        if concept not in canonical:
+            continue
+        eng = float(canonical[concept]["value"])
+        best = None
+        for e in m["candidates"].get(concept, []):
+            if e.get("role") not in ("summary", "inputs", "support", "other"):
+                continue
+            sc = scales.get(e["sheet"], 1.0) if concept in _MONEY else 1.0
+            v = float(e["value"]) * sc
+            if eng and v and 0.2 <= abs(v) / max(abs(eng), 1e-9) <= 5.0:  # deal-sized
+                if best is None or abs(v - eng) < abs(best[0] - eng):
+                    best = (v, e)
+        if best is None:
+            continue
+        sv, e = best
+        denom = max(abs(eng), abs(sv), 1e-9)
+        rows.append({"label": lab, "engine": eng, "summary": sv,
+                     "kind": "money" if concept in _MONEY else "rate",
+                     "match": abs(eng - sv) / denom <= 0.10, "source": e["display"]})
+    return rows
+
+
 def build_deal_truth(file_path: str | Path) -> dict[str, Any]:
     file_path = Path(file_path)
     m = build_workbook_map(file_path)
@@ -1065,6 +1118,17 @@ def build_deal_truth(file_path: str | Path) -> dict[str, Any]:
     guardrails = _build_guardrails(canonical, oracle, identities, ops, deal_type, m)
     brief_facts = deal_brief_facts(canonical, oracle, hold, ops)
 
+    # Per-fact summary cross-check (engine vs what the summary displays).
+    summary_check = _summary_reconciliation(m, canonical, oracle, file_path)
+    mism = [r["label"] for r in summary_check if not r["match"]]
+    if mism:
+        guardrails.append({
+            "code": "summary_mismatch",
+            "message": ("The summary disagrees with the cash-flow engine on: "
+                        + ", ".join(mism) + ". Use the engine value; the summary "
+                        "is stale/mislabeled for these."),
+            "evidence": [r for r in summary_check if not r["match"]]})
+
     result = {
         "version": DEAL_TRUTH_VERSION,
         "file": file_path.name,
@@ -1076,6 +1140,7 @@ def build_deal_truth(file_path: str | Path) -> dict[str, Any]:
         "hold": hold,
         "canonical": canonical,
         "brief_facts": brief_facts,
+        "summary_check": summary_check,
         "operating_series": {k: {kk: vv for kk, vv in v.items() if kk != "by_year"}
                              | {"by_year": v.get("by_year")} for k, v in ops.items()},
         "oracle": {leg: {k: v for k, v in (oracle.get(leg) or {}).items() if k != "flows"}
