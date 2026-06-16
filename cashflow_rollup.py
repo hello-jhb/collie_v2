@@ -45,6 +45,17 @@ ROLLUP_VERSION = "2026-06-15.1"
 _FLOW_CONCEPTS = {"noi", "revenue", "opex", "capex", "debt_service",
                   "levered_cf", "unlevered_cf"}
 
+# Words that mark a running balance / waterfall / equity line — NOT an operating
+# flow. Such a row can out-mass a real revenue/NOI line and hijack the pick.
+_NON_OPERATING_WORDS = ("balance", "cumulative", "running", "waterfall",
+                        "distribution", "promote", "contribution", "beginning",
+                        "ending", "trap", "reserve account", "irr", "multiple")
+
+
+def _is_operating_row(label: str) -> bool:
+    l = (label or "").lower()
+    return not any(w in l for w in _NON_OPERATING_WORDS)
+
 
 def _label_col(grid: list[tuple], first_period_col: int) -> int:
     """The column before the period axis with the most text — the line-item
@@ -119,6 +130,11 @@ def rollup_model(file_path: str | Path, sheets: list[str] | None = None) -> dict
             ru = rollup_sheet(grids[s], s)
             if ru and ru["line_items"]:
                 rollups.append(ru)
+
+    # NB: line items are reported in each sheet's NATIVE units. A sheet can be in
+    # $ and another in $000s; resolving absolute scale requires the deal anchor
+    # (NOI/exit_cap ≈ sale, debt+equity=cost), which the caller (deal_truth) has —
+    # cross-sheet peak-ratio guessing mis-scales unlike sheets and is avoided here.
     line_items = [it | {"sheet": ru["sheet"]} for ru in rollups for it in ru["line_items"]]
     return {"version": ROLLUP_VERSION, "sheets": [r["sheet"] for r in rollups],
             "rollups": rollups, "line_items": line_items}
@@ -143,23 +159,42 @@ def _full_year_value(item: dict, pick: str) -> float | None:
     return None
 
 
+def _traj(it: dict) -> dict:
+    return {
+        "label": it["label"], "source": f"{it['sheet']}!row{it['row']}",
+        "by_year": it["by_year"],
+        "going_in": _full_year_value(it, "going_in"),
+        "stabilized": _full_year_value(it, "stabilized"),
+        "exit": _full_year_value(it, "exit"),
+    }
+
+
 def concept_trajectories(rollup: dict) -> dict[str, dict]:
     """Per FLOW concept, the single best consolidated line item (most periods,
     then largest magnitude — a total dominates its components, avoiding the
-    double-count of summing component + total rows), as an annual trajectory."""
+    double-count of summing component + total rows). The operating statement
+    (revenue / opex / NOI / capex / debt service) is anchored to the SHEET where
+    NOI was found, so the lines are mutually consistent (same context + units);
+    the cash-flow streams are taken wherever they live."""
+    def pick(concept, sheet=None):
+        cands = [it for it in rollup["line_items"]
+                 if it.get("concept") == concept and _is_operating_row(it["label"])
+                 and (sheet is None or it["sheet"] == sheet)]
+        return max(cands, key=lambda it: (it["n_periods"], abs(it["total"]))) if cands else None
+
     out: dict[str, dict] = {}
-    for concept in _FLOW_CONCEPTS:
-        cands = [it for it in rollup["line_items"] if it.get("concept") == concept]
-        if not cands:
-            continue
-        best = max(cands, key=lambda it: (it["n_periods"], abs(it["total"])))
-        out[concept] = {
-            "label": best["label"], "source": f"{best['sheet']}!row{best['row']}",
-            "by_year": best["by_year"],
-            "going_in": _full_year_value(best, "going_in"),
-            "stabilized": _full_year_value(best, "stabilized"),
-            "exit": _full_year_value(best, "exit"),
-        }
+    noi = pick("noi")
+    anchor = noi["sheet"] if noi else None
+    if noi:
+        out["noi"] = _traj(noi)
+    for concept in ("revenue", "opex", "capex", "debt_service"):
+        it = pick(concept, anchor) or pick(concept)   # prefer NOI's sheet
+        if it:
+            out[concept] = _traj(it)
+    for concept in ("unlevered_cf", "levered_cf"):
+        it = pick(concept)
+        if it:
+            out[concept] = _traj(it)
     return out
 
 
