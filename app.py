@@ -767,14 +767,6 @@ def render_scenario() -> None:
 # Deal Analyzer — 3-column workspace (process | Outcome | Chat)
 # =============================================================================
 
-_DEEP_DIVE_SPECS = [
-    ("capital_structure", "Capital Structure"),
-    ("cash_flow",         "Cash Flow/NOI"),
-    ("return_profile",    "Return Profile"),
-    ("capex_plan",        "CapEx Plan"),
-    ("key_risks",         "Key Risks"),
-]
-
 _REPORT_SYSTEM = (
     "You are a real estate analyst writing the final deal memo. You are given the "
     "verified facts, the Deal Brief, the Initial View (the investment reasoning — "
@@ -828,7 +820,7 @@ def _render_deal_analyzer(agent: AgentSession) -> None:
     with left:
         _render_process_actions(agent, batch_id, confirmed, analysis_req, gate_edited)
     with right:
-        _render_chat_column(agent, suggestions=confirmed and analysis_req)
+        _render_chat_column(agent)
 
     with st.expander("📂 SSOT — Asset record (debug)", expanded=False):
         _ssot_panel()
@@ -1135,7 +1127,7 @@ def _ensure_agent_grounded(agent: AgentSession, batch_id) -> None:
     st.session_state.agent_grounded_batch = batch_id
 
 
-def _render_chat_column(agent: AgentSession, suggestions: bool = False) -> None:
+def _render_chat_column(agent: AgentSession) -> None:
     """Right column: chat transcript with Add-to-Outcome, suggested-analysis
     chips, the chat form, and the Generate Report action."""
     st.markdown('<div class="da-col-title">Chat</div>', unsafe_allow_html=True)
@@ -1155,20 +1147,11 @@ def _render_chat_column(agent: AgentSession, suggestions: bool = False) -> None:
                         _fold_to_outcome(m["content"])
                         st.rerun()
 
-    # Prompt box (per mockup): ONE bordered card holding the suggested-analysis
-    # chips directly above the prompt area, with a full-width Send below. Chips
-    # are pill-styled via the .st-key-dd_chips CSS scope; results land in the
-    # transcript above, where "Add to Outcome" folds them into the middle.
+    # Prompt box: the bordered card holds the chat input. The per-topic analyses
+    # (capital structure / cash flow-NOI / capex / returns) are no longer separate
+    # buttons here — they render as ONE grounded integrated analysis in the Outcome
+    # (_render_integrated_analysis).
     with st.container(border=True, key="chat_box"):
-        if suggestions:
-            with st.container(key="dd_chips"):
-                row1 = st.columns(3)
-                row2 = st.columns(3)
-                slots = row1 + row2
-                for i, (key, label) in enumerate(_DEEP_DIVE_SPECS):
-                    with slots[i]:
-                        if st.button(label, key=f"dd_{key}"):
-                            _run_deep_dive(agent, key, label)
         with st.form("da_chat", clear_on_submit=True, border=False):
             txt = st.text_area(
                 "Ask", height=90, label_visibility="collapsed",
@@ -1258,58 +1241,6 @@ def _generate_report() -> None:
         st.toast("Report generated and saved to the SSOT.")
     except Exception as e:
         st.caption(f"(Saved to view; SSOT write skipped: {e})")
-
-
-def _run_deep_dive(agent: AgentSession, key: str, label: str) -> None:
-    """Focused analysis: read the topic's sheets WHOLE and summarize in one pass
-    (the cashflow/NOI dive reads the NOI/proforma tabs; capital structure reads
-    the debt tabs; etc.) — fast and grounded in the real sheet, vs the old
-    agentic re-read. Lands in the chat transcript where it can fold to the
-    Outcome. st.rerun() is OUTSIDE the guard (it works by raising)."""
-    from scenarios._llm import llm_available
-    # Resolve via getattr, not a fixed `from … import focused_dive`: Streamlit
-    # Cloud caches imported submodules across hot-reloads, so right after a push
-    # `scenarios.deep_dives` can be a STALE cached module missing a newly-added
-    # symbol — a plain import then ImportError-crashes the app. getattr lets us
-    # degrade to the legacy dive instead. (A full app reboot clears the cache.)
-    from scenarios import deep_dives as _dd
-    focused_dive = getattr(_dd, "focused_dive", None)
-    run_deep_dive = getattr(_dd, "run_deep_dive", None)
-
-    if not llm_available():
-        st.caption("OPENAI_API_KEY is not set.")
-        return
-
-    rerun = False
-    try:
-        files = sorted(st.session_state.uploaded_filenames)
-        source_file = files[0] if files else None
-        ori = st.session_state.wb_orientation
-        orientation = ori if (ori and not ori.get("error")) else None
-
-        with st.spinner(f"Reading the {label} sheets…"):
-            if focused_dive and source_file:
-                result = focused_dive(key, UPLOAD_DIR / source_file, orientation)
-            else:
-                result = {"error": "No workbook uploaded."} if not source_file else {"error": "stale"}
-            if "error" in result and run_deep_dive:
-                # Last resort: the legacy single-shot dive over SSOT data.
-                result = run_deep_dive(key)
-
-        if "error" in result:
-            st.caption(result["error"])
-        else:
-            agent.messages.append({"role": "user",      "content": label})
-            agent.messages.append({"role": "assistant", "content": result["narrative"]})
-            rerun = True
-    except Exception as e:
-        import traceback as _tb
-        st.error(f"Couldn't run {label}: {type(e).__name__}: {e}")
-        with st.expander("Details"):
-            st.code("".join(_tb.format_exc())[-1500:])
-
-    if rerun:
-        st.rerun()
 
 
 def _handle_chat_input(agent: AgentSession, user_input: str | None) -> None:
