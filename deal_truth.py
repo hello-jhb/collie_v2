@@ -877,25 +877,8 @@ def _derive_stack_from_spine(oracle: dict, canonical: dict) -> float:
     legs = [s for s in (lev, unlev) if s]
     if not legs:
         return 1.0
-    # Streams can be in DIFFERENT units (one tab in $, another in $000s). Detect
-    # each stream's scale against a common deal-sized reference: the largest of
-    # the debt anchor and the streams' own peak magnitudes. A stream ~1000x below
-    # that reference is in thousands.
-    debt = float(canonical["debt"]["value"]) if "debt" in canonical else 0.0
-    peaks = {id(s): max((abs(v) for _, v in s["flows"]), default=0.0) for s in legs}
-    ref = max([debt] + list(peaks.values()))
-
-    for s in legs:
-        peak = peaks[id(s)] or 1.0
-        sc = _nearest_pow10(ref / peak)
-        sc = sc if sc in (1.0, 1e3, 1e6) else 1.0
-        s["_scale"] = sc
-        if sc != 1.0:
-            s["flows"] = [(d, v * sc) for d, v in s["flows"]]
-            if s.get("initial_outflow") is not None:
-                s["initial_outflow"] *= sc
-    # rebuild candidates from the (now-scaled) leg streams so operating derivation
-    # uses the same scaled flows.
+    # Streams arrive in FULL DOLLARS — the spine already applied each sheet's
+    # DECLARED units ("$ in 000s" etc.). So derive the stack directly.
     oracle["candidates"] = [{**s, "label": name}
                             for name, s in (("levered", lev), ("unlevered", unlev)) if s]
 
@@ -912,12 +895,40 @@ def _derive_stack_from_spine(oracle: dict, canonical: dict) -> float:
         setc("total_cost", -sum(v for _, v in unlev["flows"] if v < 0), unlev, "Σ unlevered outflows")
         setc("sale_price", max((v for _, v in unlev["flows"]), default=None), unlev, "terminal inflow")
         # Acquisition cost = the largest single outflow (the asset purchase at
-        # close dwarfs monthly operating/construction flows). Derived from the
-        # stream, not a vocab-matched closing-cost line — fixes "$1.3M purchase".
+        # close dwarfs monthly operating/construction flows).
         mn = min((v for _, v in unlev["flows"]), default=0.0)
         if mn < 0:
             setc("purchase_price", -mn, unlev, "acquisition outflow (largest single)")
-    return unlev.get("_scale", 1.0) if unlev else 1.0
+
+    # Bring vocab-sourced cost/debt onto the full-$ scale set by the stream-
+    # derived EQUITY (the reliable full-$ anchor), using the scale-invariant LTC
+    # ratio. Needed when there's no unlevered stream, so total_cost/debt came from
+    # vocab in their sheet's units. cost = equity / (1 − LTC); debt = cost − equity.
+    eq = _val_of(canonical, "equity")
+    ltc = _val_of(canonical, "ltc")
+    ci = canonical.get("total_cost")
+    if eq and ci and ci.get("method") != "recomputed" and ltc and 0 < ltc < 1:
+        cv = abs(float(ci["value"]))
+        if cv > 0:
+            sc = _nearest_pow10((eq / (1 - ltc)) / cv)
+            if sc in (1e-3, 1e3, 1e6):
+                canonical["total_cost"] = {**ci, "value": float(ci["value"]) * sc}
+    cost = _val_of(canonical, "total_cost")
+    di = canonical.get("debt")
+    if di and cost and eq and (cost - eq) > 0:
+        dv = abs(float(di["value"]))
+        if dv > 0:
+            sc = _nearest_pow10((cost - eq) / dv)
+            if sc in (1e-3, 1e3, 1e6):
+                canonical["debt"] = {**di, "value": float(di["value"]) * sc}
+    return 1.0
+
+
+def _val_of(canonical: dict, c: str):
+    try:
+        return float(canonical[c]["value"]) if c in canonical else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _engine_not_found(file_path: Path, spine) -> dict[str, Any]:

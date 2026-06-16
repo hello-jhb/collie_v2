@@ -7,11 +7,10 @@ validated spine (deal_truth) and the deterministic full-read roll-up
 (cashflow_rollup). No GPT extraction, so it ALWAYS loads, and every number is
 grounded in the cash-flow model rather than guessed off a truncated sheet.
 
-Units note: returns / stack / hold / sale are absolute and validated. The
-operating statement (NOI / revenue / opex / capex) is read in the model's NATIVE
-units — internally consistent (revenue − opex = NOI) with correct MARGINS and
-GROWTH (unit-invariant); absolute figures are labelled "(as modeled)" because
-cross-sheet absolute unit normalization is still being finalized.
+Units: figures are normalized to full dollars — the spine and roll-up read each
+sheet's DECLARED units ("$ in 000s" etc.), and the operating statement is
+reconciled to the deal (stabilized NOI / exit_cap ≈ sale) for the few sheets
+that don't declare units.
 
 Public:
     build_analysis(file_path) -> {"ok", "md", "sections", "dt"}
@@ -47,6 +46,40 @@ def _x(v) -> str:
 
 def _val(can: dict, c: str):
     return float(can[c]["value"]) if c in can else None
+
+
+def _nearest_pow10(x: float) -> float:
+    import math
+    return float(10 ** round(math.log10(x))) if x > 0 else 1.0
+
+
+def _reconcile_operating_units(traj: dict, can: dict) -> dict:
+    """Most sheets declare their units (handled upstream); a few don't. Anchor the
+    operating statement to the (full-$) deal: scale so stabilized NOI / exit_cap ≈
+    sale price. Reliable now that sale/cap are themselves in full dollars."""
+    noi = traj.get("noi")
+    if not (noi and isinstance(noi.get("stabilized"), (int, float))):
+        return traj
+    ec, sp = _val(can, "exit_cap"), _val(can, "sale_price")
+    if not (ec and sp):
+        return traj
+    cf = ec / 100.0 if ec > 1.5 else ec
+    raw = abs(noi["stabilized"])
+    if cf <= 0 or raw <= 0:
+        return traj
+    scale = _nearest_pow10(sp * cf / raw)
+    if scale in (1.0,) or scale not in (1e-3, 1e3, 1e6):
+        return traj
+    out = dict(traj)
+    for c in ("noi", "revenue", "opex", "capex", "debt_service"):
+        if c in out:
+            t = dict(out[c])
+            for k in ("going_in", "stabilized", "exit"):
+                if isinstance(t.get(k), (int, float)):
+                    t[k] = t[k] * scale
+            t["by_year"] = {y: v * scale for y, v in t["by_year"].items()}
+            out[c] = t
+    return out
 
 
 def _src(can: dict, c: str) -> str:
@@ -111,27 +144,24 @@ def build_analysis(file_path: str | Path, dt: dict | None = None) -> dict[str, A
     cf = ["#### Cash Flow / NOI Trajectory"]
     try:
         from cashflow_rollup import rollup_model, concept_trajectories
-        traj = concept_trajectories(rollup_model(file_path))
+        traj = _reconcile_operating_units(concept_trajectories(rollup_model(file_path)), can)
     except Exception:
         traj = {}
     noi = traj.get("noi")
     if noi:
         gi, st, ex = noi.get("going_in"), noi.get("stabilized"), noi.get("exit")
-        cf.append(_line("NOI (as modeled)",
-                        f"{_money(gi)} going-in → {_money(st)} stabilized → {_money(ex)} exit",
+        cf.append(_line("NOI", f"{_money(gi)} going-in → {_money(st)} stabilized → {_money(ex)} exit",
                         f"`{noi['source']}`"))
         if isinstance(gi, (int, float)) and isinstance(st, (int, float)) and gi:
             cf.append(_line("NOI growth (going-in → stabilized)", _pct(st/gi - 1)))
         rev = traj.get("revenue")
         if rev and isinstance(rev.get("stabilized"), (int, float)) and isinstance(st, (int, float)) and rev["stabilized"]:
             cf.append(_line("NOI margin (stabilized)", _pct(st / rev["stabilized"])))
-        for c, lab in (("revenue", "Revenue (as modeled)"), ("opex", "Operating expenses (as modeled)")):
+        for c, lab in (("revenue", "Revenue"), ("opex", "Operating expenses")):
             tr = traj.get(c)
             if tr:
                 cf.append(_line(lab, f"{_money(tr.get('going_in'))} → {_money(tr.get('stabilized'))}",
                                 f"`{tr['source']}`"))
-        cf.append("\n_Operating figures are in the model's native units (margins/growth "
-                  "are unit-invariant); absolute scale normalization is in progress._")
     else:
         cf.append("_No operating line items found in the model's cash-flow sheets._")
     sections["cash_flow"] = "\n".join(cf)
@@ -140,7 +170,7 @@ def build_analysis(file_path: str | Path, dt: dict | None = None) -> dict[str, A
     cp = ["#### CapEx"]
     cx = traj.get("capex")
     if cx:
-        cp.append(_line("CapEx / reserves (as modeled)",
+        cp.append(_line("CapEx / reserves",
                         f"{_money(cx.get('going_in'))} going-in → {_money(cx.get('stabilized'))} stabilized",
                         f"`{cx['source']}`"))
     else:

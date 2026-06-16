@@ -340,6 +340,26 @@ def periodicity_of(flows: list[tuple[_dt.date, float]]) -> str:
     return "monthly" if med <= 45 else "quarterly" if med <= 135 else "annual"
 
 
+_UNITS_THOUSANDS = _re.compile(r"in thousand|'000s|\$\s*000|\(000|\b000s\b", _re.I)
+_UNITS_MILLIONS = _re.compile(r"in million|\$\s*mm\b|000,000", _re.I)
+
+
+def sheet_scale(grid: list[tuple], max_rows: int = 15) -> float:
+    """Read the sheet's DECLARED units from a header label — "$ in 000s",
+    "($ in thousands)", "in millions" — and return the multiplier to FULL dollars.
+    RE models state their units in a header; this is the reliable absolute-scale
+    anchor (debt/cost/NOI can all be in $000s and internally consistent, so there
+    is no other way to know)."""
+    for row in grid[:max_rows]:
+        for v in row:
+            if isinstance(v, str) and len(v) < 80:
+                if _UNITS_MILLIONS.search(v):
+                    return 1e6
+                if _UNITS_THOUSANDS.search(v):
+                    return 1e3
+    return 1.0
+
+
 def _stream_stats(flows: list[tuple[_dt.date, float]]):
     irr = xirr(flows)
     if irr is None:
@@ -358,6 +378,7 @@ def find_streams(grids: dict[str, list[tuple]]) -> list[Stream]:
     for sheet, grid in grids.items():
         nrows = len(grid)
         ncols = max((len(r) for r in grid), default=0)
+        sc = sheet_scale(grid)               # the sheet's declared units → full $
 
         # --- horizontal axes: a row of dates; each other row is a series -------
         for ar in range(nrows):
@@ -370,7 +391,7 @@ def find_streams(grids: dict[str, list[tuple]]) -> list[Stream]:
                 if r == ar:
                     continue
                 vals = [_num(_cell(grid, r, c)) for c in cols]
-                flows = [(dates[i], vals[i]) for i in range(len(cols)) if vals[i] is not None]
+                flows = [(dates[i], vals[i] * sc) for i in range(len(cols)) if vals[i] is not None]
                 if len(flows) < _MIN_PERIODS:
                     continue
                 st = _stream_stats(flows)
@@ -393,7 +414,7 @@ def find_streams(grids: dict[str, list[tuple]]) -> list[Stream]:
                 if c == ac:
                     continue
                 vals = [_num(_cell(grid, r, c)) for r in rows]
-                flows = [(dates[i], vals[i]) for i in range(len(rows)) if vals[i] is not None]
+                flows = [(dates[i], vals[i] * sc) for i in range(len(rows)) if vals[i] is not None]
                 if len(flows) < _MIN_PERIODS:
                     continue
                 st = _stream_stats(flows)

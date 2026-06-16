@@ -28,7 +28,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from cashflow_spine import _load_grids, _date_run, _num, periodicity_of
+from cashflow_spine import _load_grids, _date_run, _num, periodicity_of, sheet_scale
 from workbook_map import _concept_of
 
 log = logging.getLogger("fb.rollup")
@@ -87,6 +87,7 @@ def rollup_sheet(grid: list[tuple], name: str) -> dict | None:
     dates = [d for _, d in run]
     periodicity = periodicity_of([(d, 0.0) for d in dates])
     lc = _label_col(grid, cols[0])
+    sc = sheet_scale(grid)               # the sheet's declared units → full $
 
     items: list[dict] = []
     for r in range(len(grid)):
@@ -97,7 +98,7 @@ def rollup_sheet(grid: list[tuple], name: str) -> dict | None:
             continue
         pairs = [(dates[i], _num(grid[r][c]))
                  for i, c in enumerate(cols) if c < len(grid[r])]
-        nums = [(d, v) for d, v in pairs if v is not None]
+        nums = [(d, v * sc) for d, v in pairs if v is not None]
         if len(nums) < 3:
             continue
         by_year: dict[int, float] = {}
