@@ -281,12 +281,20 @@ def compute_analytics(facts: list[dict]) -> dict[str, Any]:
         lines.append(f"Basis per unit: {_money(per)} ({_money(base_for_unit)} / {size:,.0f}).")
 
     # --- Debt fragility flags --------------------------------------------
-    floating = c.get("interest_spread") is not None or c.get("rate_cap") is not None
+    rate_type = next((str(f.get("value")) for f in facts
+                      if f.get("concept") == "rate_type"
+                      or str(f.get("field", "")).strip().lower() in ("rate type", "interest rate type")),
+                     None)
+    floating = (c.get("interest_spread") is not None or c.get("rate_cap") is not None
+                or rate_type == "floating")
     if floating:
-        cap_note = f", cap {_pct(c['rate_cap'])}" if c.get("rate_cap") else " (no cap found)"
-        flags.append({"code": "floating_rate", "label": "Floating-rate debt",
-                      "detail": f"spread {_pct(c['interest_spread'])}{cap_note}" if c.get("interest_spread")
-                      else f"rate cap present{cap_note}"})
+        if c.get("interest_spread") is not None or c.get("rate_cap") is not None:
+            cap_note = f", cap {_pct(c['rate_cap'])}" if c.get("rate_cap") else " (no cap found)"
+            detail = (f"spread {_pct(c['interest_spread'])}{cap_note}" if c.get("interest_spread")
+                      else f"rate cap present{cap_note}")
+        else:
+            detail = "index-linked (SOFR/LIBOR + spread); levered return rides the rate path"
+        flags.append({"code": "floating_rate", "label": "Floating-rate debt", "detail": detail})
     ltv, ltc, dscr, dy = c.get("ltv"), c.get("ltc"), c.get("dscr"), c.get("debt_yield")
     if ltv and ltv > _HIGH_LTV:
         flags.append({"code": "high_ltv", "label": "High leverage",

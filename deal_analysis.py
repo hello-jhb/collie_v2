@@ -115,6 +115,11 @@ def build_analysis(file_path: str | Path, dt: dict | None = None) -> dict[str, A
         if c in can:
             v = _val(can, c)
             cs.append(_line(lab, _x(v) if c == "dscr" else _pct(v), _src(can, c)))
+    rt = dt.get("rate_type") or {}
+    if rt.get("type") in ("floating", "fixed"):
+        ev = "; ".join(rt.get("evidence", [])[:2])
+        cs.append(_line("Rate type", rt["type"].capitalize(), ev,
+                        " ⚠ exposed to rate moves" if rt["type"] == "floating" else ""))
     sections["capital_structure"] = "\n".join(cs)
 
     # --- Return Profile ---------------------------------------------------

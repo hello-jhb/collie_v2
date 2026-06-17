@@ -36,13 +36,14 @@ from __future__ import annotations
 
 import datetime as _dt
 import logging
+import re
 import sys
 from pathlib import Path
 from typing import Any
 
 from workbook_map import build_workbook_map, _passes_domain, _concept_of
 from financial_model_parser import parse_workbook_tables_cached
-from cashflow_spine import find_spine
+from cashflow_spine import find_spine, _load_grids
 
 log = logging.getLogger("fb.dealtruth")
 if not log.handlers:
@@ -1004,6 +1005,51 @@ def _summary_reconciliation(m: dict, canonical: dict, oracle: dict,
     return rows
 
 
+# ---------------------------------------------------------------------------
+# Floating- vs fixed-rate classification (deterministic, universal markers)
+# ---------------------------------------------------------------------------
+# True of the whole corpus: floating-rate RE debt references an INDEX (SOFR /
+# LIBOR / EURIBOR), a spread/margin over it, a rate cap, or an index forward
+# curve. A fixed-rate deal has none of those — just a coupon / "fixed rate".
+# Detected from sheet names + header labels; not tuned to any single model.
+_RE_FLOAT = re.compile(
+    r"\bsofr\b|\blibor\b|\beuribor\b|\bbsby\b|\bfloating\b|rate cap|cap strike"
+    r"|forward curve|interest rate spread|interest spread|loan spread|credit spread"
+    r"|\bl\s*\+|spread \(l", re.I)
+_RE_SPREADISH = re.compile(r"\bspread\b|\bmargin\b", re.I)
+_RE_NOT_RATE_MARGIN = re.compile(r"noi|operating|profit|gross|ebitda|exit", re.I)
+_RE_RATE_CONTEXT = re.compile(r"interest|\brate\b|\bloan\b|\bdebt\b|\(l\+|libor|sofr", re.I)
+_RE_FIXED = re.compile(r"fixed[\s-]?rate|\bcoupon\b", re.I)
+
+
+def _detect_rate_type(grids: dict) -> dict:
+    """Classify the debt as floating | fixed | unknown from universal markers in
+    sheet names + header labels. Floating dominates: any index / cap / spread
+    marker means floating; 'fixed rate' / 'coupon' with NO floating marker means
+    fixed; otherwise unknown. ('% margin' alone is ignored unless it sits in a rate
+    context — so an 'Exit NOI Margin' can't masquerade as a loan margin.)"""
+    evidence: list[str] = []
+    for sheet, grid in grids.items():
+        if _RE_FLOAT.search(sheet):
+            evidence.append(f"sheet “{sheet}”")
+        for row in grid[:60]:
+            for v in row:
+                if not (isinstance(v, str) and 1 < len(v) < 60):
+                    continue
+                if _RE_FLOAT.search(v):
+                    evidence.append(v.strip()[:40])
+                elif (_RE_SPREADISH.search(v) and _RE_RATE_CONTEXT.search(v)
+                      and not _RE_NOT_RATE_MARGIN.search(v)):
+                    evidence.append(v.strip()[:40])
+    if evidence:
+        return {"type": "floating", "evidence": sorted(set(evidence))[:5]}
+    fixed_ev = [v.strip()[:40] for grid in grids.values() for row in grid[:60]
+                for v in row if isinstance(v, str) and _RE_FIXED.search(v)]
+    if fixed_ev:
+        return {"type": "fixed", "evidence": sorted(set(fixed_ev))[:3]}
+    return {"type": "unknown", "evidence": []}
+
+
 def build_deal_truth(file_path: str | Path) -> dict[str, Any]:
     file_path = Path(file_path)
     m = build_workbook_map(file_path)
@@ -1118,6 +1164,17 @@ def build_deal_truth(file_path: str | Path) -> dict[str, Any]:
     guardrails = _build_guardrails(canonical, oracle, identities, ops, deal_type, m)
     brief_facts = deal_brief_facts(canonical, oracle, hold, ops)
 
+    # Floating- vs fixed-rate classification (the interest-rate check) — a floating
+    # deal's levered return is exposed to rate moves, so flag it.
+    rate_type = _detect_rate_type(_load_grids(file_path))
+    if rate_type["type"] == "floating":
+        guardrails.append({
+            "code": "floating_rate",
+            "message": ("Floating-rate debt — the levered return is exposed to rate "
+                        "moves and rides the modelled index path; check the rate cap. "
+                        "Evidence: " + "; ".join(rate_type["evidence"]) + "."),
+            "evidence": rate_type["evidence"]})
+
     # Per-fact summary cross-check (engine vs what the summary displays).
     summary_check = _summary_reconciliation(m, canonical, oracle, file_path)
     mism = [r["label"] for r in summary_check if not r["match"]]
@@ -1147,6 +1204,7 @@ def build_deal_truth(file_path: str | Path) -> dict[str, Any]:
                    for leg in ("levered", "unlevered") if oracle.get(leg)},
         "identities": identities,
         "guardrails": guardrails,
+        "rate_type": rate_type,
     }
     log.info("TRUTH %s — type=%s, hold=%s, %d canonical, %d identities, %d guardrails",
              file_path.name, deal_type, (hold or {}).get("months"),
@@ -1250,6 +1308,13 @@ def to_intel_facts(dt: dict) -> list[dict]:
         facts.append({
             "field": field, "value": v, "display": _intel_display(concept, v),
             "sheet": sheet or None, "cell": cell or None,
+            "trust": {"verdict": "show", "confidence": "high"},
+        })
+    rt = dt.get("rate_type") or {}
+    if rt.get("type") in ("floating", "fixed"):
+        facts.append({
+            "field": "rate type", "concept": "rate_type", "value": rt["type"],
+            "display": rt["type"].capitalize(),
             "trust": {"verdict": "show", "confidence": "high"},
         })
     return facts
