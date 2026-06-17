@@ -163,6 +163,24 @@ st.markdown(
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
+
+def _ui_mode() -> str:
+    """'customer' (clean, outcome-only) or 'dev' (full panels). Resolved from the
+    ?mode= query param, then st.secrets['COLLIE_UI'], then the COLLIE_UI env var;
+    defaults to 'dev'. The deployed customer app sets COLLIE_UI=customer."""
+    import os
+    val = ""
+    try:
+        val = st.query_params.get("mode") or ""
+    except Exception:
+        val = ""
+    if not val:
+        try:
+            val = st.secrets.get("COLLIE_UI", "") or ""
+        except Exception:
+            val = ""
+    return (val or os.environ.get("COLLIE_UI", "") or "dev").strip().lower()
+
 # Default values for every session_state key the app uses. Defined as a single
 # dict so we can both initialize on first load AND defensively fall back to
 # defaults if any key is missing later (e.g. after a Streamlit error / rerun
@@ -696,7 +714,10 @@ def render_scenario() -> None:
     # legacy single-column agent-loop path below is kept only as a safeguard and
     # is no longer reached from the UI.
     if scenario_key in ("deal_review", "perf_vs_plan"):
-        _render_deal_analyzer(agent)
+        if _ui_mode() == "customer":
+            _render_customer_analyzer(agent)
+        else:
+            _render_deal_analyzer(agent)
         return
 
     # Header
@@ -833,6 +854,137 @@ def _render_deal_analyzer(agent: AgentSession) -> None:
 
     with st.expander("📂 SSOT — Asset record (debug)", expanded=False):
         _ssot_panel()
+
+
+# =============================================================================
+# Customer view — single split screen (files + progress | outcome + prompt)
+# =============================================================================
+# Same engine and caches as the dev Deal Analyzer; presentation only. The GPT
+# "deal brief", the orientation panel, the 22-field checklist, the trust panel and
+# the SSOT debug are all invisible here — only the deterministic, cash-flow-
+# validated Deal Analysis shows. Perf-vs-plan is step 4 when actuals are uploaded.
+
+
+def _render_customer_analyzer(agent: AgentSession) -> None:
+    import datetime as _dt
+    st.markdown(
+        f'<div class="da-header"><span class="da-title">Collie</span>'
+        f'<span class="da-date">Deal analysis · {_dt.date.today():%Y-%m-%d}</span></div>',
+        unsafe_allow_html=True,
+    )
+    st.divider()
+
+    files = st.session_state.uploaded_filenames
+    batch_id = frozenset(files) if files else None
+    dt = _ensure_deal_truth(batch_id) if batch_id else None
+    if batch_id:
+        try:
+            _ensure_agent_grounded(agent, batch_id)
+        except Exception:                          # grounding is best-effort
+            pass
+
+    left, mid = st.columns([1, 2.4], gap="large")
+    with left:
+        _customer_inputs(files, batch_id, dt)
+    with mid:
+        _customer_outcome(batch_id, dt, agent)
+
+
+def _customer_inputs(files, batch_id, dt) -> None:
+    st.markdown("**Files**")
+    up = st.file_uploader("Upload model", type=["xlsx", "xlsm"],
+                          accept_multiple_files=True, key="cust_model_upload",
+                          label_visibility="collapsed")
+    if up:
+        for uf in up:
+            dest = UPLOAD_DIR / uf.name
+            if not dest.exists():
+                dest.write_bytes(uf.getbuffer())
+        current = {f.name for f in up}
+        if current != st.session_state.uploaded_filenames:
+            st.session_state.uploaded_filenames = current
+            st.rerun()
+
+    if batch_id:
+        st.caption("Actuals — track vs plan (optional)")
+        act = st.file_uploader("Upload statement(s)", type=["xlsx", "xlsm"],
+                               accept_multiple_files=True, key="cust_actuals_upload",
+                               label_visibility="collapsed")
+        if act:
+            for uf in act:
+                dest = UPLOAD_DIR / uf.name
+                if not dest.exists():
+                    dest.write_bytes(uf.getbuffer())
+            current = {f.name for f in act}
+            if current != st.session_state.actuals_filenames:
+                st.session_state.actuals_filenames = current
+                st.rerun()
+
+    st.markdown("**Progress**")
+    engine_ok = bool(dt and not dt.get("error") and dt.get("engine_found", True))
+    failed = bool(batch_id and dt and (dt.get("error") or not dt.get("engine_found", True)))
+    st.markdown(f"{':green[✓]' if batch_id else ':gray[○]'} Read the model")
+    st.markdown(f"{':green[✓]' if engine_ok else (':orange[!]' if failed else ':gray[○]')} "
+                "Reconstruct & validate")
+    st.markdown(f"{':green[✓]' if engine_ok else ':gray[○]'} Deal analysis")
+    if st.session_state.actuals_filenames:
+        st.markdown(":blue[●] **How are we tracking?**")
+
+
+def _customer_analysis(batch_id, dt):
+    """The integrated analysis, cached per batch (same cache keys as the dev view)."""
+    cache = st.session_state.get("deal_analysis")
+    if st.session_state.get("deal_analysis_batch") == batch_id and cache:
+        return cache
+    files = sorted(st.session_state.uploaded_filenames)
+    if not files:
+        return None
+    from deal_analysis import build_analysis
+    try:
+        with st.spinner("Building the analysis…"):
+            cache = build_analysis(UPLOAD_DIR / files[0], dt=dt)
+    except Exception as e:                         # pragma: no cover - defensive
+        return {"md": f"_Analysis unavailable: {e}_"}
+    st.session_state.deal_analysis = cache
+    st.session_state.deal_analysis_batch = batch_id
+    return cache
+
+
+def _customer_outcome(batch_id, dt, agent) -> None:
+    if not batch_id:
+        st.info("Upload an underwriting model on the left to begin.")
+        return
+    if not dt or dt.get("error"):
+        st.warning("Couldn't reconstruct this model from its cash flow."
+                   + (f" ({dt.get('error')})" if dt and dt.get("error") else ""))
+        return
+
+    with st.container(border=True):
+        if dt.get("engine_found", True):
+            st.markdown(":green[✓ Reconstructed & validated from the cash flow]")
+        analysis = _customer_analysis(batch_id, dt)
+        if analysis and analysis.get("md"):
+            st.markdown(analysis["md"])
+        elif dt.get("brief_facts"):
+            _render_nonnegotiables_md(dt)
+
+    if st.session_state.actuals_filenames:
+        res = _ensure_perf_vs_plan(batch_id)
+        if res:
+            with st.container(border=True):
+                if res.get("ok"):
+                    st.markdown(res["md"])
+                else:
+                    st.markdown("### How are we tracking?")
+                    st.warning(res.get("reason", ""))
+                    for f in (res.get("validation") or {}).get("failures", [])[:6]:
+                        st.markdown(f"- {f.get('identity')} [{f.get('period')}]: {f.get('detail')}")
+
+    st.markdown("##### Ask about this deal")
+    for m in agent.display_messages():
+        with st.chat_message(m["role"]):
+            st.markdown(m["content"])
+    _handle_chat_input(agent, st.chat_input("Ask about this deal…"))
 
 
 def _render_process_inputs(files, batch_id, confirmed: bool) -> None:
@@ -2437,6 +2589,13 @@ def _render_tool_trace(agent: AgentSession) -> None:
 # =============================================================================
 # Router
 # =============================================================================
+
+# Customer mode is a single deal-analysis workspace — skip the scenario picker and
+# drop straight into the analyzer.
+if _ui_mode() == "customer" and st.session_state.active_scenario is None:
+    st.session_state.active_scenario = "deal_review"
+    if st.session_state.get("agent_session") is None:
+        st.session_state.agent_session = AgentSession("deal_review")
 
 if st.session_state.active_scenario is None:
     render_landing()
