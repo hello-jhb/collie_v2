@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from actuals_statement import _RE_MGMT, _RE_RESERVE, _RE_CAPEX
+from cashflow_spine import xirr, find_spine
 
 log = logging.getLogger("fb.pvp")
 if not log.handlers:
@@ -138,6 +139,22 @@ def _reconcile_scale(plan_map: dict, actual_map: dict) -> tuple[dict, str | None
     return plan_map, None
 
 
+def _actual_to_model_scale(model_noi: dict, actual_noi: dict, overlap: set) -> float:
+    """Factor to bring actual NOI onto the MODEL's units (the stream's scale) before
+    splicing — power-of-1000 only, else 1.0 (a real gap, not a units gap)."""
+    import statistics
+    mv = [abs(model_noi[m]) for m in overlap if model_noi.get(m)]
+    av = [abs(actual_noi[m]) for m in overlap if actual_noi.get(m)]
+    if not mv or not av:
+        return 1.0
+    ratio = statistics.median(mv) / statistics.median(av)
+    if ratio >= 300:
+        return 1e3 if ratio < 3e5 else 1e6
+    if ratio <= 1 / 300:
+        return 1 / 1e3 if ratio > 1 / 3e5 else 1 / 1e6
+    return 1.0
+
+
 def align_noi(plan_map: dict, actual_map: dict) -> dict[str, Any]:
     """Line plan NOI against actual NOI. Prefer CALENDAR overlap (the honest
     apples-to-apples window); fall back to elapsed-index only if the two never share
@@ -161,18 +178,47 @@ def align_noi(plan_map: dict, actual_map: dict) -> dict[str, Any]:
             "pct": (at - pt) / abs(pt) if pt else None}
 
 
-def _returns_status(a: dict) -> dict[str, Any]:
-    """V1 gate: blended IRR/EM is always withheld — returns come AFTER trust."""
-    if a.get("has_debt_service"):
-        reason = ("The statement reports debt service, but a definition-compatible "
-                  "cash-flow replacement (principal amortization + reserves, reconciled to "
-                  "a levered cash flow) is not yet established — so blended IRR/EM is "
-                  "withheld.")
-    else:
-        reason = ("The statement reports operations to NOI only (no debt service / levered "
-                  "cash flow), so actual months cannot replace the plan's financing cash "
-                  "flows — blended IRR/EM is withheld.")
-    return {"available": False, "reason": reason + " (V1: trust first, returns second.)"}
+def _blend_leg(flows: list, noi_delta: dict, overlap: set) -> dict[str, Any]:
+    """Blended stream = projected stream with the actual-NOI DELTA applied to the
+    operating months in the overlap. We know only actual NOI (not actual capex or
+    financing), so we hold those at plan and flow the NOI variance through:
+        blended_CF(m) = projected_CF(m) + (actual_NOI(m) − plan_NOI(m)).
+    This is correct for BOTH legs (the delta is the NOI line; capex & debt service
+    sit below it, unchanged) and preserves the model's lumpy capex/TI-LC outflows."""
+    blended, n = [], 0
+    for i, (d, v) in enumerate(flows):
+        ym = d.isoformat()[:7]
+        if 0 < i < len(flows) - 1 and ym in overlap and ym in noi_delta:
+            blended.append((d, v + noi_delta[ym]))
+            n += 1
+        else:
+            blended.append((d, v))
+    irr = xirr(blended)
+    infl = sum(v for _, v in blended if v > 0)
+    outf = sum(v for _, v in blended if v < 0)
+    return {"blended_irr": irr, "blended_em": (infl / abs(outf)) if outf else None,
+            "n_spliced": n}
+
+
+def compute_returns(spine, model_noi: dict, actual_noi: dict, overlap: set,
+                    scale: float) -> list[dict]:
+    """Blended IRR/EM per leg from the actual-NOI delta (capex & financing held at
+    plan). Actuals are scaled to the model's units first. The result inherits the
+    NOI-variance definition match — if that's unconfirmed, so is this."""
+    delta = {ym: actual_noi[ym] * scale - model_noi[ym]
+             for ym in overlap if ym in actual_noi and ym in model_noi}
+    out: list[dict] = []
+    for leg in ("levered", "unlevered"):
+        m = spine.matched.get(leg)
+        if not m:
+            continue
+        bl = _blend_leg(m["flows"], delta, overlap)
+        out.append({"leg": leg, "available": bl["blended_irr"] is not None,
+                    "projected_irr": m["recomputed_irr"], "blended_irr": bl["blended_irr"],
+                    "projected_em": m.get("recomputed_em"), "blended_em": bl["blended_em"],
+                    "n_spliced": bl["n_spliced"],
+                    "basis": "actual NOI; capex & financing held at plan"})
+    return out
 
 
 def build_perf_vs_plan(model_path, statement_paths, sheet: str | None = None) -> dict[str, Any]:
@@ -199,29 +245,43 @@ def build_perf_vs_plan(model_path, statement_paths, sheet: str | None = None) ->
         return {"ok": False, "blocked": "plan_noi_missing",
                 "reason": "could not read a projected NOI series from the model"}
 
-    plan_map = _monthly_map(noi_tr["by_period"])
+    model_noi = _monthly_map(noi_tr["by_period"])             # model-native scale
     actual_map = {m["period"]: m["noi"] for m in a["months"]}
-    plan_map, scale_note = _reconcile_scale(plan_map, actual_map)
+    plan_map, scale_note = _reconcile_scale(dict(model_noi), actual_map)   # for the variance display
 
     dm = match_definitions(plan_basis_from_rollup(ru, None), a.get("basis", {}))
     var = align_noi(plan_map, actual_map)
+
+    # Output B — blended returns, per leg, where the actuals are definition-
+    # compatible with the leg's cash flow. Needs a calendar overlap + the validated
+    # streams; the levered leg stays withheld unless the statement carries the
+    # financing line (debt service).
+    returns: list[dict] = []
+    if var["basis"] == "calendar":
+        sp = find_spine(model_path)
+        if sp.ok:
+            overlap = {p["period"] for p in var["periods"]}
+            scale = _actual_to_model_scale(model_noi, actual_map, overlap)
+            returns = compute_returns(sp, model_noi, actual_map, overlap, scale)
+
     result = {
         "ok": True, "version": PVP_VERSION,
         "model": Path(model_path).name, "statement": a.get("file") or a.get("files"),
-        "variance": var, "definition_match": dm, "returns_status": _returns_status(a),
+        "variance": var, "definition_match": dm, "returns": returns,
         "plan_noi_line": noi_tr["label"], "plan_noi_source": noi_tr["source"],
         "validation": a["validation"], "scale_note": scale_note,
         "drivers": a.get("expense_drivers", [])[:5],
     }
     result["md"] = render_perf_vs_plan(result)
-    log.info("PVP %s vs %s — align=%s n=%d, var=%+.0f (%.1f%%), defmatch=%s",
+    log.info("PVP %s vs %s — align=%s n=%d, var=%+.0f (%.1f%%), defmatch=%s, returns=%s",
              result["model"], a.get("file"), var["basis"], var["n"], var["delta"],
-             (var["pct"] or 0) * 100, dm["verdict"])
+             (var["pct"] or 0) * 100, dm["verdict"],
+             ",".join(f"{r['leg']}:{'✓' if r.get('available') else '—'}" for r in returns) or "none")
     return result
 
 
 def render_perf_vs_plan(r: dict) -> str:
-    v, dm, rs = r["variance"], r["definition_match"], r["returns_status"]
+    v, dm = r["variance"], r["definition_match"]
     money = lambda x: f"${x:,.0f}"                                          # noqa: E731
     L = ["## How are we tracking? — plan vs actual", ""]
 
@@ -255,9 +315,28 @@ def render_perf_vs_plan(r: dict) -> str:
                                  for p in worst if p["delta"] < 0))
     L.append("")
 
-    # B. Returns — gated in V1.
-    L.append("### B. Updated returns (blended)")
-    L.append(f"> ⚠ **Withheld.** {rs['reason']}")
+    # B. Updated returns — actual NOI flowed through the plan's cash flows.
+    L.append("### B. Updated returns (blended: actual NOI to date + plan thereafter)")
+    returns = r.get("returns") or []
+    if not returns:
+        L.append("> ⚠ **Withheld.** No calendar-overlapping projected stream to apply "
+                 "the actual NOI to.")
+    for rr in returns:
+        leg = rr["leg"].capitalize()
+        if rr.get("available"):
+            pi, bi = rr["projected_irr"], rr.get("blended_irr")
+            pe, be = rr.get("projected_em"), rr.get("blended_em")
+            irr_s = f"underwritten {pi * 100:.2f}% → **tracking {bi * 100:.2f}%**"
+            em_s = f"; EM {pe:.2f}× → {be:.2f}×" if (pe and be) else ""
+            L.append(f"- **{leg}:** {irr_s}{em_s}")
+        else:
+            L.append(f"- **{leg}:** ⚠ withheld — {rr.get('reason', '')}")
+    if returns:
+        L.append(f"- _First {returns[0]['n_spliced']} mo use actual NOI; capex & financing "
+                 f"held at plan (the statement reports NOI only)._")
+        if dm["verdict"] != "confirmed":
+            L.append(f"- ⚠ _Subject to the NOI definition match above "
+                     f"({dm['verdict']}) — same basis caveat applies to these figures._")
     return "\n".join(L)
 
 

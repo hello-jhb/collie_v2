@@ -94,8 +94,40 @@ def end_to_end() -> None:
     check(r["definition_match"]["verdict"] == "unconfirmed"
           and any("management fee" in c for c in r["definition_match"]["caveats"]),
           "mgmt-fee definition caveat fires visibly (DoD #3)")
-    check(r["returns_status"]["available"] is False,
-          "blended returns withheld (V1 gate)")
+    # Output B — blended returns now computed (actuals 17.5% under plan → both legs dip).
+    rets = {x["leg"]: x for x in r["returns"]}
+    check(rets.get("unlevered", {}).get("available") and rets.get("levered", {}).get("available"),
+          "both legs' blended returns computed (NOI-delta needs no debt service)")
+    check(rets["unlevered"]["blended_irr"] < rets["unlevered"]["projected_irr"]
+          and rets["levered"]["blended_irr"] < rets["levered"]["projected_irr"],
+          "blended IRR tracks BELOW plan on both legs (actuals were under)")
+    check(rets["levered"]["projected_irr"] - rets["levered"]["blended_irr"]
+          > rets["unlevered"]["projected_irr"] - rets["unlevered"]["blended_irr"],
+          "leverage amplifies the NOI miss (levered drops more bps)")
+
+
+def returns_splice() -> None:
+    print("\n— returns: NOI-delta splice (preserves capex; direction correct)")
+    import datetime as dt
+    from perf_vs_plan_engine import _blend_leg, xirr
+    # acq, 4 operating months (one a capex/TI OUTFLOW), sale.
+    flows = [
+        (dt.date(2021, 1, 1), -1000.0),
+        (dt.date(2021, 2, 1), 100.0),
+        (dt.date(2021, 3, 1), -300.0),    # capex month — operating but negative
+        (dt.date(2021, 4, 1), 100.0),
+        (dt.date(2021, 5, 1), 100.0),
+        (dt.date(2021, 12, 1), 1300.0),   # sale
+    ]
+    overlap = {"2021-02", "2021-03", "2021-04", "2021-05"}
+    base = _blend_leg(flows, {k: 0.0 for k in overlap}, overlap)
+    check(abs(base["blended_irr"] - xirr(flows)) < 1e-9,
+          "zero NOI-delta leaves the stream (and IRR) unchanged")
+    lower = _blend_leg(flows, {k: -20.0 for k in overlap}, overlap)
+    higher = _blend_leg(flows, {k: +20.0 for k in overlap}, overlap)
+    check(lower["blended_irr"] < base["blended_irr"] < higher["blended_irr"],
+          "actual below plan → IRR drops; above plan → IRR rises (capex NOT overwritten)")
+    check(base["n_spliced"] == 4, "all operating overlap months adjusted, acq + sale untouched")
 
 
 def trust_gate_blocks() -> None:
@@ -122,6 +154,7 @@ def trust_gate_blocks() -> None:
 if __name__ == "__main__":
     match_logic()
     statement_basis()
+    returns_splice()
     end_to_end()
     trust_gate_blocks()
     print(f"\n{'ALL PASS' if _fail == 0 else f'{_fail} FAILED'}")
