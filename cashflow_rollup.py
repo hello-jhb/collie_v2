@@ -17,9 +17,13 @@ No GPT, no per-file logic. Reuses the spine's axis detection (dates / years /
 text headers, the same code that already validated across the corpus).
 
 Public:
-    rollup_sheet(grid, name)         -> annual line-item roll-up of one sheet
+    rollup_sheet(grid, name)         -> annual roll-up + per-period series of one sheet
     rollup_model(file_path, sheets)  -> roll up the cash-flow model sheet(s)
-    concept_trajectories(rollup)     -> {concept: {by_year, going_in, stabilized, exit}}
+    concept_trajectories(rollup)     -> {concept: {by_year, by_period, going_in, ...}}
+
+Each line item also carries `by_period` — the raw monthly (or whatever-periodicity)
+series — so the plan's month-by-month projection can be lined up against actuals
+(perf-vs-plan). The annual roll-up is unchanged; the per-period series is additive.
 """
 from __future__ import annotations
 
@@ -110,6 +114,8 @@ def rollup_sheet(grid: list[tuple], name: str) -> dict | None:
             "label": label.strip()[:48], "row": r + 1,
             "concept": _concept_of(label),
             "by_year": dict(sorted(by_year.items())),
+            "by_period": [(d.isoformat(), v) for d, v in nums],   # scaled per-period series
+            "periodicity": periodicity,
             "months_per_year": months,
             "total": sum(v for _, v in nums), "n_periods": len(nums),
         })
@@ -164,6 +170,8 @@ def _traj(it: dict) -> dict:
     return {
         "label": it["label"], "source": f"{it['sheet']}!row{it['row']}",
         "by_year": it["by_year"],
+        "by_period": it.get("by_period", []),
+        "periodicity": it.get("periodicity"),
         "going_in": _full_year_value(it, "going_in"),
         "stabilized": _full_year_value(it, "stabilized"),
         "exit": _full_year_value(it, "exit"),

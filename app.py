@@ -214,6 +214,13 @@ _SESSION_DEFAULTS: dict = {
     # structure / returns / cash flow-NOI / capex) shown in the Outcome. ---
     "deal_analysis":         None,
     "deal_analysis_batch":   None,
+    # --- Perf vs Plan (perf_vs_plan_engine.py): actuals statement(s) uploaded
+    # SEPARATELY and compared to THIS model's projected NOI. Optional add-on — the
+    # Deal Analyzer works standalone without it; the perf section only appears
+    # once a statement is uploaded. ---
+    "actuals_filenames":     set(),
+    "perf_vs_plan":          None,
+    "perf_vs_plan_key":      None,
     # --- Deal Analyzer 3-column frontend (deal_review) ---
     # Batch whose deal context has been seeded into the chat agent's history
     # (so follow-up Q&A is grounded in THIS model, not answered generically).
@@ -684,9 +691,11 @@ def render_scenario() -> None:
     cfg = SCENARIO_CONFIG[scenario_key]
     agent: AgentSession = st.session_state.agent_session
 
-    # deal_review uses the 3-column Deal Analyzer; other scenarios keep the
-    # legacy single-column workspace below.
-    if scenario_key == "deal_review":
+    # deal_review and perf_vs_plan both use the 3-column Deal Analyzer (the model
+    # is analysed there; perf_vs_plan adds a separate statements uploader). The
+    # legacy single-column agent-loop path below is kept only as a safeguard and
+    # is no longer reached from the UI.
+    if scenario_key in ("deal_review", "perf_vs_plan"):
         _render_deal_analyzer(agent)
         return
 
@@ -848,6 +857,30 @@ def _render_process_inputs(files, batch_id, confirmed: bool) -> None:
             st.session_state.uploaded_filenames = current
             st.rerun()
 
+    # --- Actuals statement(s) — optional add-on for "How are we tracking?".
+    # Placed right under the model upload so it is the FIRST thing visible once a
+    # model loads (otherwise it gets buried under the orientation + progress
+    # panels). Separate uploader; the Deal Analyzer works standalone without it.
+    if batch_id:
+        st.markdown("**📊 Actuals — track vs plan (optional)**")
+        st.caption("Upload monthly operating statement(s) to compare actual NOI to "
+                   "this model's projection.")
+        act = st.file_uploader(
+            "Upload statement(s)", type=["xlsx", "xlsm"],
+            accept_multiple_files=True, key="da_actuals_upload",
+            label_visibility="collapsed",
+        )
+        if act:
+            for uf in act:
+                dest = UPLOAD_DIR / uf.name
+                if not dest.exists():
+                    dest.write_bytes(uf.getbuffer())
+            current = {f.name for f in act}
+            if current != st.session_state.actuals_filenames:
+                st.session_state.actuals_filenames = current
+                st.rerun()
+        st.divider()
+
     # Workbook Orientation runs FIRST — understand the workbook's structure
     # before searching it for metrics — and its map is shown here so the user
     # can verify the engine oriented correctly before extraction output appears.
@@ -921,6 +954,12 @@ def _render_outcome_column(agent: AgentSession, batch_id, confirmed: bool, analy
     if not batch_id:
         st.info("Upload an underwriting workbook (left) to begin.")
         return None
+
+    # Optional add-on: if actuals statement(s) were uploaded, lead the Outcome with
+    # the plan-vs-actual variance ("How are we tracking?"). Absent statements, this
+    # renders nothing and the Deal Analyzer behaves exactly as before (standalone).
+    if st.session_state.actuals_filenames:
+        _render_perf_vs_plan(batch_id)
 
     if not confirmed:
         _render_model_brief(batch_id)
@@ -1711,6 +1750,49 @@ def _ensure_deal_truth(batch_id) -> dict | None:
     st.session_state.deal_truth = dt
     st.session_state.deal_truth_batch = batch_id
     return dt
+
+
+def _ensure_perf_vs_plan(batch_id):
+    """Compute the plan-vs-actual variance once per (model batch + actuals upload).
+    Deterministic — no GPT, no API key. The model is the workbook already loaded in
+    the Deal Analyzer; the statement(s) come from the separate actuals uploader."""
+    files = sorted(st.session_state.uploaded_filenames)
+    actuals = sorted(st.session_state.actuals_filenames)
+    if not files or not actuals:
+        return None
+    key = (frozenset(files), frozenset(actuals))
+    if (st.session_state.get("perf_vs_plan_key") == key
+            and st.session_state.get("perf_vs_plan")):
+        return st.session_state.perf_vs_plan
+    from perf_vs_plan_engine import build_perf_vs_plan
+    with st.spinner("Reconciling actuals · matching the NOI definition · computing variance…"):
+        try:
+            res = build_perf_vs_plan(UPLOAD_DIR / files[0],
+                                     [UPLOAD_DIR / a for a in actuals])
+        except Exception as e:
+            res = {"ok": False, "blocked": "error", "reason": f"{type(e).__name__}: {e}"}
+    st.session_state.perf_vs_plan = res
+    st.session_state.perf_vs_plan_key = key
+    return res
+
+
+def _render_perf_vs_plan(batch_id) -> None:
+    """Outcome add-on: the plan-vs-actual NOI variance. Renders the reconciliation
+    banner + variance when trustworthy, or the explicit block reason + the specific
+    footing failures when the statement can't be trusted (the refusal IS the product
+    — never a silent comparison)."""
+    res = _ensure_perf_vs_plan(batch_id)
+    if res is None:
+        return
+    with st.container(border=True):
+        if res.get("ok"):
+            st.markdown(res["md"])
+        else:
+            st.markdown("## How are we tracking? — plan vs actual")
+            st.warning(f"**Comparison withheld ({res.get('blocked', 'blocked')}).** "
+                       f"{res.get('reason', '')}")
+            for f in (res.get("validation") or {}).get("failures", [])[:6]:
+                st.markdown(f"- ✗ {f.get('identity')} [{f.get('period')}]: {f.get('detail')}")
 
 
 def _ensure_investment_view(batch_id, brief: dict, scored: dict) -> dict:
