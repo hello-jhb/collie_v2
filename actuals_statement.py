@@ -77,6 +77,43 @@ _RE_CODEPREFIX = _re.compile(r"^\d[\dA-Za-z]*(?:-[\dA-Za-z]+)+\s+")
 # the expense hierarchy never double-counts. Universal across charts of accounts.
 _RE_SUBTOTAL = _re.compile(r"^(total|net|gross|subtotal|sub[\s-]total)\b")
 
+# Canonical operating-expense categories — for line-item variance ("what moved").
+# Names won't match across statement vs model, so we map BOTH to these concepts and
+# compare like-for-like. Order matters (first match wins): the specific categories
+# come before the catch-alls (e.g. "Property Tax" → tax before "Audit & Tax Fees" →
+# professional). A leaf that matches nothing falls into "other" — so the per-concept
+# sums always foot back to total opex (the variance bridge can self-check).
+_OPEX_CATS = [
+    ("real_estate_tax",     r"property tax|real estate tax|\br/?e tax\b"),
+    ("insurance",           r"insurance"),
+    ("utilities",           r"utilit|electric|\bwater\b|sewer|\btrash\b|\bgas\b|\bpower\b|telephon"),
+    ("repairs_maintenance", r"repair|mainten|\br&m\b|r & m|hvac|plumb|elevator|pest|janitor"
+                            r"|landscap|\bgrounds\b|turnover|\bturn\b|cleaning|sweeping|amenity"),
+    ("management",          r"management fee|mgmt fee|property management|prop mgmt|asset management|management exp"),
+    ("payroll",             r"payroll|salar|\bwages\b|\blabor\b|bonus|employee"),
+    ("marketing_leasing",   r"market|advertis|leasing|promotion|\blease\b|\bcrm\b|retention|website"),
+    ("professional",        r"professional|legal|\baudit\b|account|consult|bookkeep|tax fee"),
+    ("bad_debt",            r"bad debt"),
+    ("security",            r"\bsecurity\b"),
+    ("administrative",      r"administ|\badmin\b|general & admin|\bg&a\b|\boffice\b|postage|bank fee"
+                            r"|software|licens|business tax|invoice|intercom|\bdues\b|subscription"),
+]
+_OPEX_CAT_RE = [(c, _re.compile(p)) for c, p in _OPEX_CATS]
+_RE_OPEX_TOTAL = _re.compile(r"^total operating expense|^total cost of (re|real estate)"
+                             r"|^operating expense|^total expense", _re.I)
+
+
+def opex_concept(label: str) -> str | None:
+    """Map an expense line to a canonical category concept. None = the opex GRAND
+    total (skip — not a category); 'other' = a real line that matched no category."""
+    n = _clean_label(label).strip().lower()
+    if _RE_OPEX_TOTAL.match(n):
+        return None
+    for concept, rx in _OPEX_CAT_RE:
+        if rx.search(n):
+            return concept
+    return "other"
+
 
 # ---------------------------------------------------------------------------
 # Layout detection (statement-appropriate; no six-period floor)
@@ -306,6 +343,10 @@ def _read_statement_sheet(grid: list[tuple], name: str) -> dict | None:
                   "opex": {"label": "Σ operating expense line items", "derived": True,
                            "n_leaves": len(leaves)}},
         "expense_drivers": drivers,
+        "expense_leaves": [
+            {"label": x["label"], "concept": opex_concept(x["label"]),
+             "series": {d.isoformat()[:7]: v for d, v in x["series"].items()}}
+            for x in leaves],
         "basis": basis,
         "has_debt_service": ds is not None,
     }
@@ -440,6 +481,8 @@ def extract_actuals_files(paths: list[str | Path]) -> dict[str, Any]:
     return {"ok": True, "trusted": trusted, "version": ACTUALS_VERSION,
             "n_months": len(months), "months": months, "lines": good[0]["lines"],
             "expense_drivers": good[0].get("expense_drivers", []),
+            "expense_leaves": good[0].get("expense_leaves", []),
+            "basis": good[0].get("basis", {}),
             "has_debt_service": any(p.get("has_debt_service") for p in good),
             "validation": {"parts": [p["validation"] for p in good], "overlap": overlap},
             "files": [p.get("file") for p in good]}

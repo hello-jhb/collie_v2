@@ -104,6 +104,17 @@ def end_to_end() -> None:
     check(rets["levered"]["projected_irr"] - rets["levered"]["blended_irr"]
           > rets["unlevered"]["projected_irr"] - rets["unlevered"]["blended_irr"],
           "leverage amplifies the NOI miss (levered drops more bps)")
+    # What moved — line-item variance, with the bridge as the self-check.
+    items = r.get("items")
+    check(items and items["categories"], "line-item variance decomposed by category")
+    resid = v["delta"] - items["explained_noi_delta"]
+    check(abs(resid) <= max(2.0, 0.03 * abs(v["delta"])),
+          f"variance bridge closes: revenue Δ − opex Δ ≈ NOI Δ (residual {resid:,.0f})")
+    cats = {c["concept"] for c in items["categories"]}
+    check({"utilities", "repairs_maintenance"} <= cats,
+          "real opex categories aligned plan↔actual (utilities, R&M, …)")
+    check(any(c["status"] == "actual_only" for c in items["categories"]),
+          "an orphan is surfaced (a category in the actuals not in the plan — e.g. bad debt)")
 
 
 def returns_splice() -> None:

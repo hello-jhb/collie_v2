@@ -21,8 +21,16 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from actuals_statement import _RE_MGMT, _RE_RESERVE, _RE_CAPEX
+from actuals_statement import _RE_MGMT, _RE_RESERVE, _RE_CAPEX, opex_concept
 from cashflow_spine import xirr, find_spine
+
+_CONCEPT_LABEL = {
+    "real_estate_tax": "Property tax", "insurance": "Insurance", "utilities": "Utilities",
+    "repairs_maintenance": "Repairs & maintenance", "management": "Management",
+    "payroll": "Payroll", "marketing_leasing": "Marketing & leasing",
+    "professional": "Professional fees", "bad_debt": "Bad debt", "security": "Security",
+    "administrative": "Administrative", "other": "Other",
+}
 
 log = logging.getLogger("fb.pvp")
 if not log.handlers:
@@ -221,6 +229,82 @@ def compute_returns(spine, model_noi: dict, actual_noi: dict, overlap: set,
     return out
 
 
+def build_variance_items(ru: dict, a: dict, overlap: set, scale: float) -> dict[str, Any]:
+    """Decompose the NOI variance into line-item drivers ("what moved"). Actual opex
+    is summed from the LEAF inventory by concept (no hierarchy double-count); plan
+    opex takes the best line per concept from the roll-up. Both are taken over the
+    calendar overlap and put in the statement's units. The variance BRIDGE — revenue
+    Δ − Σ(category Δ) ≈ NOI Δ — self-checks that the decomposition is complete; the
+    residual is surfaced, not hidden. Categories on one side only are orphans."""
+    from collections import defaultdict
+    from cashflow_rollup import concept_trajectories
+    inv = (1.0 / scale) if scale else 1.0          # model units → statement units
+    tr = concept_trajectories(ru)
+
+    # Actual opex by category — summed from LEAVES over the overlap (positive). The
+    # full leaf total feeds the bridge; only named categories ('other' excluded)
+    # feed the movers.
+    actual_cat: dict[str, float] = defaultdict(float)
+    actual_opex_total = 0.0
+    for leaf in a.get("expense_leaves", []):
+        s = sum(v for m, v in leaf["series"].items() if m in overlap)
+        actual_opex_total += s
+        con = leaf.get("concept")
+        if con and con != "other":
+            actual_cat[con] += s
+
+    # Plan opex by category — from the sheet RICHEST in opex detail (so SOFR-curve /
+    # lease-roll lines on other sheets can't masquerade as expenses). Model opex is
+    # a negative outflow, so compare absolute magnitudes.
+    by_sheet: dict[str, set] = defaultdict(set)
+    for it in ru.get("line_items", []):
+        con = opex_concept(it["label"])
+        if con and con != "other":
+            by_sheet[it["sheet"]].add(con)
+    opex_sheet = max(by_sheet, key=lambda s: len(by_sheet[s])) if by_sheet else None
+    plan_cat: dict[str, float] = defaultdict(float)
+    for it in ru.get("line_items", []):
+        if it["sheet"] != opex_sheet:
+            continue
+        con = opex_concept(it["label"])
+        if not con or con == "other":
+            continue
+        s = sum(v for d, v in (it.get("by_period") or []) if d[:7] in overlap)
+        plan_cat[con] += abs(s) * inv
+
+    # The opex-detail sheet can be on a different basis than the operating opex
+    # (gross/recoverable vs net), so anchor the category MIX to the operating opex
+    # total used in the bridge — keeps both sides like-for-like.
+    plan_opex_total = abs(sum(v for d, v in (tr.get("opex", {}).get("by_period") or [])
+                              if d[:7] in overlap)) * inv
+    plan_named = sum(plan_cat.values())
+    if plan_named > 0 and plan_opex_total > 0:
+        f = plan_opex_total / plan_named
+        plan_cat = {c: v * f for c, v in plan_cat.items()}
+
+    rows = []
+    for con in set(actual_cat) | set(plan_cat):
+        p, ac = plan_cat.get(con, 0.0), abs(actual_cat.get(con, 0.0))
+        status = ("matched" if con in plan_cat and con in actual_cat
+                  else "plan_only" if con in plan_cat else "actual_only")
+        rows.append({"concept": con, "label": _CONCEPT_LABEL.get(con, con.title()),
+                     "plan": p, "actual": ac, "delta": ac - p, "status": status})
+    rows.sort(key=lambda r: -abs(r["delta"]))
+
+    # Bridge uses the TOTALS (so it foots): revenue Δ − opex Δ ≈ NOI Δ.
+    plan_rev = _monthly_map(tr.get("revenue", {}).get("by_period", []))
+    actual_rev = {m["period"]: m["revenue"] for m in a["months"]}
+    rev_p = sum(plan_rev.get(m, 0.0) * inv for m in overlap)
+    rev_a = sum(actual_rev[m] for m in overlap if actual_rev.get(m) is not None)
+    revenue_delta = rev_a - rev_p
+    opex_delta = actual_opex_total - plan_opex_total
+    return {"categories": rows,
+            "movers": [r for r in rows if abs(r["delta"]) > 1][:6],
+            "orphans": [r for r in rows if r["status"] != "matched" and abs(r["delta"]) > 1],
+            "revenue_delta": revenue_delta, "opex_delta": opex_delta,
+            "explained_noi_delta": revenue_delta - opex_delta}
+
+
 def build_perf_vs_plan(model_path, statement_paths, sheet: str | None = None) -> dict[str, Any]:
     """End-to-end V1: reconcile the actuals, definition-match them to the plan, and
     report the NOI variance — gating the comparison on the statement footing, and
@@ -252,6 +336,13 @@ def build_perf_vs_plan(model_path, statement_paths, sheet: str | None = None) ->
     dm = match_definitions(plan_basis_from_rollup(ru, None), a.get("basis", {}))
     var = align_noi(plan_map, actual_map)
 
+    # What moved — line-item variance by category (only meaningful on a calendar overlap).
+    items = None
+    if var["basis"] == "calendar":
+        scale_a2m = _actual_to_model_scale(model_noi, actual_map,
+                                           {p["period"] for p in var["periods"]})
+        items = build_variance_items(ru, a, {p["period"] for p in var["periods"]}, scale_a2m)
+
     # Output B — blended returns, per leg, where the actuals are definition-
     # compatible with the leg's cash flow. Needs a calendar overlap + the validated
     # streams; the levered leg stays withheld unless the statement carries the
@@ -267,7 +358,7 @@ def build_perf_vs_plan(model_path, statement_paths, sheet: str | None = None) ->
     result = {
         "ok": True, "version": PVP_VERSION,
         "model": Path(model_path).name, "statement": a.get("file") or a.get("files"),
-        "variance": var, "definition_match": dm, "returns": returns,
+        "variance": var, "definition_match": dm, "returns": returns, "items": items,
         "plan_noi_line": noi_tr["label"], "plan_noi_source": noi_tr["source"],
         "validation": a["validation"], "scale_note": scale_note,
         "drivers": a.get("expense_drivers", [])[:5],
@@ -314,6 +405,30 @@ def render_perf_vs_plan(r: dict) -> str:
                      + ", ".join(f"{p['period']} {money(p['delta'])}"
                                  for p in worst if p["delta"] < 0))
     L.append("")
+
+    # A.1 What moved — line-item variance by category.
+    items = r.get("items")
+    if items and items["categories"]:
+        L.append("### What moved (vs plan, same months)")
+        rd0 = items["revenue_delta"]
+        L.append(f"- **Revenue:** {money(rd0)} {'under' if rd0 < 0 else 'over'} plan "
+                 "_(the headline driver)_")
+        for it in items["movers"]:
+            if abs(it["delta"]) < 1:
+                continue
+            tag = {"matched": "", "plan_only": " _(plan only)_",
+                   "actual_only": " _(not in plan)_"}[it["status"]]
+            dirn = "over" if it["delta"] > 0 else "under"
+            L.append(f"- **{it['label']}:** plan {money(it['plan'])} vs actual "
+                     f"{money(it['actual'])} → {money(it['delta'])} {dirn}{tag}")
+        rd, od = items["revenue_delta"], items["opex_delta"]
+        explained, actual_noi = items["explained_noi_delta"], v["delta"]
+        resid = actual_noi - explained
+        bridge = "✓ explains the NOI variance" if abs(resid) <= max(2.0, 0.03 * abs(actual_noi or 1)) \
+            else f"⚠ {money(resid)} unexplained (definition/period mismatch)"
+        L.append(f"- _Bridge: revenue {money(rd)} − opex {money(od)} = {money(explained)} "
+                 f"vs NOI variance {money(actual_noi)} — {bridge}._")
+        L.append("")
 
     # B. Updated returns — actual NOI flowed through the plan's cash flows.
     L.append("### B. Updated returns (blended: actual NOI to date + plan thereafter)")
