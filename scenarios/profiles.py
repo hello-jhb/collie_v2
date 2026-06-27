@@ -60,43 +60,11 @@ SCENARIO_PROFILES: dict[str, dict[str, Any]] = {
             },
         },
     },
-    "perf_vs_plan": {
-        "description": (
-            "Compare actual cash flow performance to plan (UW or BP). "
-            "Full cash flow waterfall, performance analysis metrics, "
-            "occupancy/income-durability subset, and current debt health."
-        ),
-        "categories": {
-            "Cash Flow": "all",           # waterfall: PGI → Cash Available for Distribution
-            "Operating Performance": "all",  # analysis: NOI Margin, NOI Growth, etc.
-            # Income-durability subset. Full Leasing category reserved for Lease Review.
-            "Leasing & Income Durability": {
-                "include_names": [
-                    "Physical Occupancy",
-                    "Economic Occupancy",
-                    "Leased Occupancy",
-                    "Vacancy Rate",
-                    "Retention Rate",
-                    "Lease-up Velocity",
-                    "Tenant Delinquency Rate",
-                ],
-            },
-            # Current debt health — NOT going-in deal structure (that's Deal Review).
-            "Debt & Leverage": {
-                "include_names": [
-                    "Current LTV",
-                    "DSCR / Debt Coverage Ratio",
-                    "Debt Yield",
-                    "Loan Balance",
-                    "Refinance DSCR",
-                    "Break-even Occupancy (Monthly)",
-                    "Covenant Headroom",
-                    "Cash Sweep Trigger Status",
-                ],
-            },
-        },
-    },
 }
+# NOTE: the perf-vs-plan profile lived here for the old LLM scenario
+# (scenarios/perf_vs_plan.py). That scenario was replaced by the deterministic
+# perf_vs_plan_engine (which reads the workbook directly, not SSOT metric subsets),
+# so the profile is gone with it.
 
 
 # -----------------------------------------------------------------------------
