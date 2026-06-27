@@ -1162,11 +1162,44 @@ def run_deal_review() -> dict[str, Any]:
 
 def run_perf_vs_plan() -> dict[str, Any]:
     """
-    Run the Performance vs Plan scenario. Reads UW (or BP) + actuals from SSOT
-    and returns a chronological variance narrative.
+    Run the Performance vs Plan scenario through the deterministic engine
+    (perf_vs_plan_engine): resolve the plan model + actuals statement(s) from the
+    SSOT layers' source files and return the engine's rendered narrative.
+
+    This routes the agent / scenario-runner path to the SAME validated engine the
+    app's outcome view uses (perf_vs_plan_engine.build_perf_vs_plan) — replacing the
+    pre-rebuild LLM scenario, so the two entry points can no longer diverge.
+    Returns {narrative, ...engine result} on success or {error} on failure.
     """
-    from scenarios.perf_vs_plan import generate_perf_vs_plan
-    return generate_perf_vs_plan()
+    from perf_vs_plan_engine import build_perf_vs_plan
+
+    layers = ssot.load_ssot().get("layers", {})
+    plan = next((layers[k].get("source_file")
+                 for k in ("business_plan", "underwriting")
+                 if k in layers and layers[k].get("source_file")), None)
+    actuals = [layers[k]["source_file"] for k in sorted(layers)
+               if k.startswith("actuals_") and layers[k].get("source_file")]
+    if not plan:
+        return {"error": "No underwriting or business-plan layer in SSOT. Ingest the plan model first."}
+    if not actuals:
+        return {"error": "No actuals layers in SSOT. Ingest at least one financial statement."}
+
+    model_path = UPLOAD_DIR / plan
+    if not model_path.exists():
+        return {"error": f"Plan file not found in uploads: {plan}"}
+    stmt_paths = [UPLOAD_DIR / f for f in actuals if (UPLOAD_DIR / f).exists()]
+    if not stmt_paths:
+        return {"error": "Actuals source files not found in uploads."}
+
+    try:
+        res = build_perf_vs_plan(model_path, stmt_paths)
+    except Exception as e:                                  # pragma: no cover - defensive
+        return {"error": f"{type(e).__name__}: {e}"}
+    if not res.get("ok"):
+        reason = res.get("reason", "")
+        return {"error": f"Comparison withheld ({res.get('blocked', 'blocked')}): {reason}".strip()}
+    res["narrative"] = res.get("md", "")
+    return res
 
 
 # =============================================================================
