@@ -2,9 +2,14 @@
 perf_vs_plan_engine.py — the perf-vs-plan ("How are we tracking?") engine: compare
 the plan's NOI to actuals, definition-matched FIRST.
 
-V1 scope (trust first, returns second): reconciliation + NOI variance only. The
-returns recalc (blended IRR / EM) is a GATED placeholder — unavailable until the
-actuals provide a definition-compatible cash-flow replacement (see `returns_status`).
+Scope (trust first, returns second): Output A is NOI reconciliation + variance,
+definition-matched. Output B is the returns recalc — blended IRR / EM, where the
+actual-NOI delta is spliced into the projected stream (actual NOI to date, plan
+thereafter; capex & financing held at plan). Output B requires a CALENDAR overlap
+between plan and actuals — without it the alignment is elapsed-index only and the
+returns are withheld. It inherits Output A's definition match: if that's
+unconfirmed, the blended figures carry the same caveat. Validated end-to-end on a
+real T-12 against its underwriting plan (both legs, calendar-aligned).
 
 Stage 3 (this file): the DEFINITION MATCH — confirm the plan's NOI and the
 statement's NOI mean the same thing before any comparison. The detectable basis
@@ -447,8 +452,10 @@ def render_perf_vs_plan(r: dict) -> str:
         else:
             L.append(f"- **{leg}:** ⚠ withheld — {rr.get('reason', '')}")
     if returns:
-        L.append(f"- _First {returns[0]['n_spliced']} mo use actual NOI; capex & financing "
-                 f"held at plan (the statement reports NOI only)._")
+        L.append(f"- _First {returns[0]['n_spliced']} mo use actual NOI; the NOI variance "
+                 f"flows to equity with capex & financing held at plan. (Projected debt "
+                 f"service isn't isolatable per-month — it sits on a separate schedule at "
+                 f"different granularity — so actual debt service is not substituted.)_")
         if dm["verdict"] != "confirmed":
             L.append(f"- ⚠ _Subject to the NOI definition match above "
                      f"({dm['verdict']}) — same basis caveat applies to these figures._")
