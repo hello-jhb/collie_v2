@@ -113,6 +113,7 @@ def rollup_sheet(grid: list[tuple], name: str) -> dict | None:
         items.append({
             "label": label.strip()[:48], "row": r + 1,
             "concept": _concept_of(label),
+            "sheet_scale": sc,   # >1 means the sheet declared units (already full-$)
             "by_year": dict(sorted(by_year.items())),
             "by_period": [(d.isoformat(), v) for d, v in nums],   # scaled per-period series
             "periodicity": periodicity,
@@ -169,6 +170,7 @@ def _full_year_value(item: dict, pick: str) -> float | None:
 def _traj(it: dict) -> dict:
     return {
         "label": it["label"], "source": f"{it['sheet']}!row{it['row']}",
+        "sheet_scale": it.get("sheet_scale", 1.0),
         "by_year": it["by_year"],
         "by_period": it.get("by_period", []),
         "periodicity": it.get("periodicity"),

@@ -17,8 +17,14 @@ Public:
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
+
+# Split floating-rate evidence into the index it floats over vs. its rate cap(s),
+# so the structure (index + spread + cap) is shown, not a bare misleading "rate".
+_RE_INDEX = re.compile(r"sofr|libor|euribor|bsby|forward curve", re.I)
+_RE_CAP = re.compile(r"\bcap\b|cap strike", re.I)
 
 
 def _money(v) -> str:
@@ -53,10 +59,22 @@ def _nearest_pow10(x: float) -> float:
     return float(10 ** round(math.log10(x))) if x > 0 else 1.0
 
 
+def _declared_units(t: dict) -> bool:
+    """True if the concept's source sheet declared its own units (sheet_scale != 1),
+    so it is already in full dollars and must NOT receive the deal anchor scale."""
+    return abs(float(t.get("sheet_scale", 1.0)) - 1.0) > 1e-9
+
+
 def _reconcile_operating_units(traj: dict, can: dict) -> dict:
     """Most sheets declare their units (handled upstream); a few don't. Anchor the
     operating statement to the (full-$) deal: scale so stabilized NOI / exit_cap ≈
-    sale price. Reliable now that sale/cap are themselves in full dollars."""
+    sale price. Reliable now that sale/cap are themselves in full dollars.
+
+    The anchor corrects sheets that DON'T declare units. A concept whose sheet DID
+    declare units is already full-$ — re-applying the anchor double-scales it (BAC:
+    capex on `Model`, declared $000s, was pushed to billions by the NOI ×1000
+    anchor). So gate on declared-units, NOT on which sheet: St Regis revenue/opex
+    live on a different *undeclared* sheet than NOI and still need the anchor."""
     noi = traj.get("noi")
     if not (noi and isinstance(noi.get("stabilized"), (int, float))):
         return traj
@@ -73,7 +91,10 @@ def _reconcile_operating_units(traj: dict, can: dict) -> dict:
     out = dict(traj)
     for c in ("noi", "revenue", "opex", "capex", "debt_service"):
         if c in out:
-            t = dict(out[c])
+            t = out[c]
+            if _declared_units(t):
+                continue   # sheet declared its units: already full-$
+            t = dict(t)
             for k in ("going_in", "stabilized", "exit"):
                 if isinstance(t.get(k), (int, float)):
                     t[k] = t[k] * scale
@@ -110,16 +131,32 @@ def build_analysis(file_path: str | Path, dt: dict | None = None) -> dict[str, A
         if c in can:
             cf = " ✅" if can[c].get("cf_validated") else ""
             cs.append(_line(lab, _money(_val(can, c)), _src(can, c), cf))
-    for c, lab in (("ltv", "LTV"), ("ltc", "LTC"), ("interest_rate", "Interest rate"),
+    rt = dt.get("rate_type") or {}
+    is_floating = rt.get("type") == "floating"
+    # On floating debt the stored "interest rate" is the SPREAD/margin over the
+    # index — there is no single all-in rate (it = index path + spread). Label it
+    # as such rather than passing the spread off as the interest rate.
+    for c, lab in (("ltv", "LTV"), ("ltc", "LTC"),
+                   ("interest_rate", "Spread (over index)" if is_floating else "Interest rate"),
                    ("dscr", "DSCR"), ("debt_yield", "Debt yield")):
         if c in can:
             v = _val(can, c)
             cs.append(_line(lab, _x(v) if c == "dscr" else _pct(v), _src(can, c)))
-    rt = dt.get("rate_type") or {}
     if rt.get("type") in ("floating", "fixed"):
-        ev = "; ".join(rt.get("evidence", [])[:2])
-        cs.append(_line("Rate type", rt["type"].capitalize(), ev,
-                        " ⚠ exposed to rate moves" if rt["type"] == "floating" else ""))
+        ev = rt.get("evidence", [])
+        if is_floating:
+            idx = [e for e in ev if _RE_INDEX.search(e)]
+            caps = [e for e in ev if _RE_CAP.search(e)]
+            bits = []
+            if idx:
+                bits.append("index-linked (" + "; ".join(idx[:2]) + ")")
+            if caps:
+                bits.append(f"{len(caps)} rate cap{'s' if len(caps) > 1 else ''} "
+                            + "(" + "; ".join(caps[:2]) + ")")
+            detail = " · ".join(bits) or "; ".join(ev[:2])
+            cs.append(_line("Rate type", "Floating", detail, " ⚠ exposed to rate moves"))
+        else:
+            cs.append(_line("Rate type", "Fixed", "; ".join(ev[:2])))
     sections["capital_structure"] = "\n".join(cs)
 
     # --- Return Profile ---------------------------------------------------
