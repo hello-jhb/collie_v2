@@ -41,9 +41,20 @@ def _money(v) -> str:
 
 
 def _pct(v) -> str:
+    """Format a canonical rate that may be stored as a fraction (0.045) OR already
+    as a percent number (4.5). The >1.5 split disambiguates those two forms."""
     if not isinstance(v, (int, float)):
         return "—"
     return f"{v*100:.2f}%" if abs(v) <= 1.5 else f"{v:.2f}%"
+
+
+def _pctf(v) -> str:
+    """Format a value that is ALWAYS a fraction — a computed ratio (growth, margin)
+    that can legitimately exceed 1.5 (a 235% growth, a 370% margin). Always ×100,
+    so it never gets mistaken for an already-percent number the way _pct would."""
+    if not isinstance(v, (int, float)):
+        return "—"
+    return f"{v*100:.1f}%"
 
 
 def _x(v) -> str:
@@ -224,11 +235,25 @@ def build_analysis(file_path: str | Path, dt: dict | None = None) -> dict[str, A
         cf.append(_line("NOI", f"{_money(gi)} going-in → {_money(st)} stabilized → {_money(ex)} exit",
                         f"`{noi['source']}`"))
         if isinstance(gi, (int, float)) and isinstance(st, (int, float)) and gi:
-            cf.append(_line("NOI growth (going-in → stabilized)", _pct(st/gi - 1)))
+            cf.append(_line("NOI growth (going-in → stabilized)", _pctf(st/gi - 1)))
+        # Revenue must be >= NOI (NOI = revenue - opex, opex >= 0). When the picked
+        # revenue row is below NOI it is the wrong row / wrong scope (e.g. St Regis,
+        # whose consolidated hotel revenue isn't captured as one row) — show neither
+        # the revenue nor a margin derived from it, rather than a >100% margin.
         rev = traj.get("revenue")
-        if rev and isinstance(rev.get("stabilized"), (int, float)) and isinstance(st, (int, float)) and rev["stabilized"]:
-            cf.append(_line("NOI margin (stabilized)", _pct(st / rev["stabilized"])))
+        rev_st = rev.get("stabilized") if rev else None
+        rev_num = isinstance(rev_st, (int, float)) and isinstance(st, (int, float)) and st > 0
+        rev_ok = rev_num and rev_st >= st
+        rev_below = rev_num and rev_st < st          # impossible: revenue < NOI
+        if rev_ok:
+            cf.append(_line("NOI margin (stabilized)", _pctf(st / rev_st)))
         for c, lab in (("revenue", "Revenue"), ("opex", "Operating expenses")):
+            if c == "revenue":
+                if rev_below:
+                    cf.append("- _Revenue not shown — the model's revenue rows don't "
+                              "reconcile to NOI (revenue reads below NOI)._")
+                if not rev_ok:               # below NOI, or unparseable — skip the line
+                    continue
             tr = traj.get(c)
             if tr:
                 cf.append(_line(lab, f"{_money(tr.get('going_in'))} → {_money(tr.get('stabilized'))}",
