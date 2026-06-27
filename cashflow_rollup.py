@@ -28,6 +28,7 @@ series — so the plan's month-by-month projection can be lined up against actua
 from __future__ import annotations
 
 import logging
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -59,6 +60,12 @@ _NON_OPERATING_WORDS = ("balance", "cumulative", "running", "waterfall",
 def _is_operating_row(label: str) -> bool:
     l = (label or "").lower()
     return not any(w in l for w in _NON_OPERATING_WORDS)
+
+
+# A true NET operating income line vs. a GROSS one (GOI/GOP sits above opex). When
+# both exist, the net line is the real NOI; gross only wins on magnitude otherwise.
+_RE_TRUE_NOI = re.compile(r"net operating income|\bnoi\b", re.I)
+_RE_GROSS_OI = re.compile(r"gross operating (income|profit)|\bgoi\b|\bgop\b|gross income", re.I)
 
 
 def _label_col(grid: list[tuple], first_period_col: int) -> int:
@@ -196,6 +203,15 @@ def concept_trajectories(rollup: dict) -> dict[str, dict]:
         cands = [it for it in rollup["line_items"]
                  if it.get("concept") == concept and _is_operating_row(it["label"])
                  and (sheet is None or it["sheet"] == sheet)]
+        if concept == "noi":
+            # A "gross operating income/profit" row out-masses the real NOI (it sits
+            # above opex), so largest-magnitude can grab GROSS instead of NET. Prefer
+            # a TRUE NOI-labelled row — but only when one exists: some models expose
+            # only GOP as their bottom line (1425), and those must keep it.
+            true_noi = [it for it in cands if _RE_TRUE_NOI.search(it["label"])
+                        and not _RE_GROSS_OI.search(it["label"])]
+            if true_noi:
+                cands = true_noi
         return max(cands, key=lambda it: (it["n_periods"], abs(it["total"]))) if cands else None
 
     out: dict[str, dict] = {}
