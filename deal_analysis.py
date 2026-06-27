@@ -110,6 +110,9 @@ def _reconcile_operating_units(traj: dict, can: dict) -> dict:
                 if isinstance(t.get(k), (int, float)):
                     t[k] = t[k] * scale
             t["by_year"] = {y: v * scale for y, v in t["by_year"].items()}
+            # by_period must scale too — it feeds the exit-NOI window and any
+            # monthly read; leaving it raw makes it inconsistent with the headline.
+            t["by_period"] = [(d, v * scale) for d, v in t.get("by_period", [])]
             out[c] = t
     return out
 
@@ -120,6 +123,34 @@ def _src(can: dict, c: str) -> str:
 
 def _line(label: str, value: str, src: str = "", flag: str = "") -> str:
     return f"- **{label}:** {value} {src}{flag}".rstrip()
+
+
+def _forward_year_noi(by_period: list, months_offset) -> float | None:
+    """Sum one forward year of a dated monthly series, starting `months_offset`
+    months after the first period — date-windowed, so it is periodicity-agnostic.
+    Used for EXIT NOI: the 12 months forward of the SALE month, what the exit price
+    is struck on — NOT the last proforma year. Returns None when the forward year
+    isn't fully covered by the data (so the caller keeps its default)."""
+    from datetime import date
+    if not by_period or not isinstance(months_offset, (int, float)):
+        return None
+    try:
+        items = [(date.fromisoformat(str(d)[:10]), v) for d, v in by_period]
+    except Exception:
+        return None
+    start, last = items[0][0], items[-1][0]
+    off = int(months_offset)
+    y = start.year + (start.month - 1 + off) // 12
+    mo = (start.month - 1 + off) % 12 + 1
+    w0, w1 = date(y, mo, 1), date(y + 1, mo, 1)
+    window = [v for d, v in items if w0 <= d < w1]
+    nonzero = [v for v in window if abs(v) > 1]
+    # Need a real forward operating year: full coverage, mostly non-zero, positive
+    # total — otherwise the window fell in a zero/empty region (the caller keeps
+    # its default rather than reporting a spurious ~0 exit NOI).
+    if last < w1 or len(nonzero) < 6 or sum(window) <= 0:
+        return None
+    return sum(window)
 
 
 def build_analysis(file_path: str | Path, dt: dict | None = None) -> dict[str, Any]:
@@ -143,6 +174,19 @@ def build_analysis(file_path: str | Path, dt: dict | None = None) -> dict[str, A
         traj = _reconcile_operating_units(concept_trajectories(rollup_model(file_path)), can)
     except Exception:
         traj = {}
+
+    # Exit NOI = the 12 months FORWARD of the sale month (what the exit price is
+    # struck on), not the last proforma year — matters on short holds that sell
+    # mid-proforma (Westview sells at month 35 of 131). Going-in stays year-1
+    # (first full calendar year); a forward-12 from acquisition reads ~$0 on deals
+    # that open in lease-up (BAC/1 South Beach), so it is NOT used there.
+    noi_t = traj.get("noi")
+    hold_mo = (dt.get("hold") or {}).get("months")
+    if noi_t and hold_mo:
+        ex = _forward_year_noi(noi_t.get("by_period"), hold_mo)
+        if isinstance(ex, (int, float)):
+            traj = dict(traj)
+            traj["noi"] = {**noi_t, "exit": ex}
 
     # --- Capital Structure ------------------------------------------------
     cs = ["#### Capital Structure"]
