@@ -1202,6 +1202,38 @@ def run_perf_vs_plan() -> dict[str, Any]:
     return res
 
 
+def run_what_if_capex(amount: float, funded_by: str = "equity",
+                      filename: str | None = None) -> dict[str, Any]:
+    """Recompute IRR / equity multiple under an UPFRONT capex / investment change,
+    on the model's VALIDATED cash-flow streams — deterministic, actually does the
+    XIRR math (the agent must not estimate this). Holds all other flows at plan."""
+    from whatif import what_if_capex
+    if filename:
+        path = UPLOAD_DIR / filename
+    else:
+        xls = sorted(p for p in UPLOAD_DIR.glob("*.xls*") if not p.name.startswith("~"))
+        if not xls:
+            return {"error": "No uploaded model file found."}
+        path = xls[0]
+    if not path.exists():
+        return {"error": f"File not found: {path.name}"}
+    try:
+        r = what_if_capex(path, amount, funded_by=funded_by)
+    except Exception as e:                                  # pragma: no cover - defensive
+        return {"error": f"{type(e).__name__}: {e}"}
+    if not r.get("ok"):
+        return {"error": r.get("reason", "could not recompute returns")}
+    lines = [f"Upfront +${r['amount']:,.0f} ({r['funded_by']}-funded), all other "
+             "cash flows held at plan:"]
+    for leg, d in r["legs"].items():
+        lines.append(
+            f"- {leg.capitalize()}: IRR {d['old_irr']*100:.2f}% → {d['new_irr']*100:.2f}% "
+            f"({d['irr_delta_bps']:+d} bps); equity multiple {d['old_em']:.2f}x → "
+            f"{d['new_em']:.2f}x ({d['em_delta']:+.3f}).")
+    r["narrative"] = "\n".join(lines)
+    return r
+
+
 # =============================================================================
 # File inspection tools — let the agent go back to the source file on demand
 # =============================================================================
@@ -1447,6 +1479,22 @@ TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },
+    "run_what_if_capex": {
+        "type": "function",
+        "function": {
+            "name": "run_what_if_capex",
+            "description": "Recompute the deal's IRR and equity multiple under an UPFRONT capex / additional-investment change, on the validated cash-flow streams. This DOES the arithmetic deterministically (XIRR on the perturbed stream) — call it instead of estimating or saying you'd need to re-run the model. Use it whenever the user asks the return impact of extra spend, a capex overrun, or more equity (e.g. 'a $500k overrun out of equity — what happens to returns?'). Holds all other cash flows at plan. Returns BOTH levered and unlevered old-vs-new IRR and equity multiple.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "amount": {"type": "number", "description": "The upfront capex / additional investment in dollars (e.g. 500000 for a $500k overrun)."},
+                    "funded_by": {"type": "string", "enum": ["equity"], "description": "Funding source. V1 supports 'equity' (raises the equity contribution and total project cost). Default 'equity'."},
+                    "filename": {"type": "string", "description": "Model file in uploads/ (optional; defaults to the loaded model)."},
+                },
+                "required": ["amount"],
+            },
+        },
+    },
     "list_sheets": {
         "type": "function",
         "function": {
@@ -1507,6 +1555,7 @@ TOOL_IMPLEMENTATIONS: dict[str, Any] = {
     "check_scenario_ready": check_scenario_ready,
     "run_deal_review": run_deal_review,
     "run_perf_vs_plan": run_perf_vs_plan,
+    "run_what_if_capex": run_what_if_capex,
     "list_sheets":  list_sheets,
     "read_sheet":   read_sheet,
     "search_file":  search_file,
@@ -1527,6 +1576,7 @@ _SHARED_TOOLS = [
     "list_sheets",   # follow-up Q&A: "what sheets are in the file?"
     "read_sheet",    # follow-up Q&A: "what's in the Growth Rate sheet?"
     "search_file",   # follow-up Q&A: "find anything mentioning rent growth"
+    "run_what_if_capex",  # follow-up Q&A: "what if capex runs $500k over, from equity?"
 ]
 
 TOOLS_FOR_DEAL_REVIEW = _SHARED_TOOLS + ["run_deal_review"]

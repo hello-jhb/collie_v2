@@ -288,7 +288,7 @@ def build_analysis(file_path: str | Path, dt: dict | None = None) -> dict[str, A
     order = ["capital_structure", "return_profile", "cash_flow", "capex", "summary_check"]
     md = "### Deal Analysis — grounded in the cash-flow model\n\n" + \
         "\n\n".join(sections[k] for k in order if k in sections)
-    return {"ok": True, "md": md, "sections": sections, "dt": dt}
+    return {"ok": True, "md": md, "sections": sections, "dt": dt, "traj": traj}
 
 
 if __name__ == "__main__":

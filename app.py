@@ -1280,8 +1280,24 @@ def _ensure_agent_grounded(agent: AgentSession, batch_id) -> None:
     truth_block, guard_block = "", ""
     dt = _ensure_deal_truth(batch_id)
     if dt and not dt.get("error"):
+        from deal_analysis import _money as _m
+        # The validated, full-$ operating trajectory — the SAME source the Deal
+        # Analysis panel shows. The canonical noi/revenue/opex POINT-facts are raw
+        # summary cells (often conflicted and in $000s), so they are NOT seeded; the
+        # trajectory is authoritative for these concepts.
+        traj = ((st.session_state.get("deal_analysis") or {}).get("traj")
+                if st.session_state.get("deal_analysis_batch") == batch_id else None)
+        if traj is None:
+            try:
+                from deal_analysis import build_analysis
+                traj = (build_analysis(UPLOAD_DIR / files[0], dt=dt) or {}).get("traj")
+            except Exception:
+                traj = None
+        _OPERATING = {"noi", "revenue", "opex"}   # covered by the trajectory below
         tl = []
         for c, info in (dt.get("canonical") or {}).items():
+            if c in _OPERATING:
+                continue
             mark = " [CONFLICT — disclose]" if info.get("conflict") else ""
             tl.append(f"- {_DT_LABELS.get(c, c)}: {_fmt_canon(c, info['value'])} "
                       f"({info.get('source','')}){mark}")
@@ -1291,6 +1307,18 @@ def _ensure_agent_grounded(agent: AgentSession, batch_id) -> None:
                      "model — use the hold, not the model length)"
                      if h.get("sells_before_model_end") else "")
             tl.append(f"- Hold period: {h['months']} months / {h['years']:g} years{early}")
+        for concept, label in (("noi", "NOI"), ("capex", "CapEx / reserves")):
+            t = (traj or {}).get(concept) or {}
+            if isinstance(t.get("stabilized"), (int, float)):
+                line = (f"- {label} (validated from the cash flow, FULL DOLLARS — "
+                        f"authoritative; raw cells are often in $000s, do NOT use them): "
+                        f"{_m(t.get('going_in'))} going-in → {_m(t.get('stabilized'))} "
+                        f"stabilized → {_m(t.get('exit'))} exit")
+                by_year = t.get("by_year") or {}
+                if concept == "noi" and by_year:
+                    line += ("\n  Annual " + label + " by calendar year: "
+                             + ", ".join(f"{y} {_m(v)}" for y, v in sorted(by_year.items())))
+                tl.append(line)
         if tl:
             truth_block = ("\n\nCANONICAL DEAL TRUTH (validated from the cash flow — "
                            "PREFER these over any other source):\n" + "\n".join(tl))
@@ -1312,7 +1340,17 @@ def _ensure_agent_grounded(agent: AgentSession, batch_id) -> None:
         "get_layer_details / read_sheet / search_file. NEVER reply with a generic "
         "textbook definition unless the user explicitly asks what a term means. If "
         "a value genuinely isn't in the model after you've looked, say so plainly "
-        "and name where you looked."
+        "and name where you looked.\n"
+        "NOI / revenue / opex: ALWAYS use the validated trajectory in CANONICAL DEAL "
+        "TRUTH above (full dollars). Do NOT read raw NOI cells with read_sheet/"
+        "search_file — the model holds many conflicting NOI cells, usually in $000s, "
+        "and they are wrong/unscaled. For an NOI bridge or annual-NOI question, use "
+        "the going-in→stabilized→exit values and the annual-by-year series given above.\n"
+        "Return-impact math (a capex overrun, extra spend, or more equity → effect on "
+        "IRR / equity multiple): call run_what_if_capex to compute it deterministically. "
+        "Do NOT estimate, describe it qualitatively, or say you'd need to re-run the "
+        "model — the tool does the XIRR math on the validated streams and returns both "
+        "levered and unlevered old-vs-new figures. Report those numbers."
     )
     agent.messages.append({"role": "system", "content": context})
     st.session_state.agent_grounded_batch = batch_id
