@@ -124,6 +124,15 @@ def build_analysis(file_path: str | Path, dt: dict | None = None) -> dict[str, A
     can = dt.get("canonical", {})
     sections: dict[str, str] = {}
 
+    # The reconciled, full-$ operating roll-up — computed once and reused for the
+    # NOI trajectory, the CapEx line, AND the going-in cap (which must divide a
+    # going-in NOI that is in the SAME full-dollar units as total cost).
+    try:
+        from cashflow_rollup import rollup_model, concept_trajectories
+        traj = _reconcile_operating_units(concept_trajectories(rollup_model(file_path)), can)
+    except Exception:
+        traj = {}
+
     # --- Capital Structure ------------------------------------------------
     cs = ["#### Capital Structure"]
     for c, lab in (("total_cost", "Total cost"), ("purchase_price", "Acquisition cost"),
@@ -136,9 +145,22 @@ def build_analysis(file_path: str | Path, dt: dict | None = None) -> dict[str, A
     # On floating debt the stored "interest rate" is the SPREAD/margin over the
     # index — there is no single all-in rate (it = index path + spread). Label it
     # as such rather than passing the spread off as the interest rate.
-    for c, lab in (("ltv", "LTV"), ("ltc", "LTC"),
-                   ("interest_rate", "Spread (over index)" if is_floating else "Interest rate"),
-                   ("dscr", "DSCR"), ("debt_yield", "Debt yield")):
+    struct = rt.get("structure") or {}
+    sp = struct.get("spread")
+    for c, lab in (("ltv", "LTV"), ("ltc", "LTC")):
+        if c in can:
+            cs.append(_line(lab, _pct(_val(can, c)), _src(can, c)))
+    # Rate / spread: on floating debt prefer the spread the model CARRIES (a per-
+    # period spread row) over the input-cell scan, which often misfires (0.00%).
+    if is_floating and sp:
+        cs.append(_line("Spread (over index)", _pct(sp["value"]), f"`{sp['source']}`"))
+    elif "interest_rate" in can:
+        cs.append(_line("Spread (over index)" if is_floating else "Interest rate",
+                        _pct(_val(can, "interest_rate")), _src(can, "interest_rate")))
+    if is_floating and struct.get("floor"):     # show the floor alongside the spread
+        fl = struct["floor"]
+        cs.append(_line("Rate floor", _pct(fl["value"]), f"`{fl['source']}`"))
+    for c, lab in (("dscr", "DSCR"), ("debt_yield", "Debt yield")):
         if c in can:
             v = _val(can, c)
             cs.append(_line(lab, _x(v) if c == "dscr" else _pct(v), _src(can, c)))
@@ -175,20 +197,27 @@ def build_analysis(file_path: str | Path, dt: dict | None = None) -> dict[str, A
         rp.append(_line("Hold period", f"{h['months']} mo ({h['years']:g} yr)",
                         f"`{h.get('source','')}`", early))
     for c, lab in (("sale_price", "Sale price"), ("exit_cap", "Exit cap"),
-                   ("yield_on_cost", "Yield on cost"), ("going_in_cap", "Going-in cap")):
+                   ("yield_on_cost", "Yield on cost")):
         if c in can:
             v = _val(can, c)
-            disp = _pct(v) if c in ("exit_cap", "yield_on_cost", "going_in_cap") else _money(v)
+            disp = _pct(v) if c == "exit_cap" or c == "yield_on_cost" else _money(v)
             rp.append(_line(lab, disp, _src(can, c)))
+    # Going-in cap = going-in (year-1) NOI / total cost. Derive it here from the
+    # reconciled roll-up: the going-in NOI must be in the same full-$ units as the
+    # cost, and it must be the GOING-IN year — not stabilized. (deal_truth derives
+    # it off an unreconciled NOI whose units/year can be wrong, e.g. Westview's
+    # $000s NOI ÷ full-$ cost gave 0.01%.)
+    gi_noi = (traj.get("noi") or {}).get("going_in")
+    cost = _val(can, "total_cost") or _val(can, "purchase_price")
+    if isinstance(gi_noi, (int, float)) and cost:
+        rp.append(_line("Going-in cap", _pct(gi_noi / cost),
+                        "`derived: going-in NOI / total cost`"))
+    elif "going_in_cap" in can:
+        rp.append(_line("Going-in cap", _pct(_val(can, "going_in_cap")), _src(can, "going_in_cap")))
     sections["return_profile"] = "\n".join(rp)
 
     # --- Cash Flow / NOI (grounded roll-up) -------------------------------
     cf = ["#### Cash Flow / NOI Trajectory"]
-    try:
-        from cashflow_rollup import rollup_model, concept_trajectories
-        traj = _reconcile_operating_units(concept_trajectories(rollup_model(file_path)), can)
-    except Exception:
-        traj = {}
     noi = traj.get("noi")
     if noi:
         gi, st, ex = noi.get("going_in"), noi.get("stabilized"), noi.get("exit")

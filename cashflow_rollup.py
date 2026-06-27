@@ -159,7 +159,12 @@ def _full_year_value(item: dict, pick: str) -> float | None:
     if not pos:
         return None
     if pick == "going_in":
-        return next((v for _, v in pos if v > 0), pos[0][1])
+        # Year-1 NOI = the first COMPLETE calendar year. A partial first year (a
+        # mid-year acquisition's stub — e.g. a Feb close gives 11 months) under-
+        # states the going-in run-rate, so skip it and use the first full year.
+        complete = [(y, v) for y, v in pos if mpy.get(y, mx) >= mx]
+        cand = complete or pos
+        return next((v for _, v in cand if v > 0), cand[0][1])
     if pick == "exit":
         return pos[-1][1]
     if pick == "stabilized":

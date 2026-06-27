@@ -1050,6 +1050,75 @@ def _detect_rate_type(grids: dict) -> dict:
     return {"type": "unknown", "evidence": []}
 
 
+# Rate STRUCTURE (for showing on the summary, not for any calc): the spread the
+# model applies and a floor, read from where the model carries them. The spread
+# is read as a per-period CARRIED series (the rate the model actually runs on —
+# this catches a floating-but-floored loan whose applied rate sits flat); the
+# floor is usually a single input cell.
+_RE_FLOOR = re.compile(r"\bfloor\b", re.I)
+_RE_SPREAD_LBL = re.compile(r"\bspread\b|\bmargin\b", re.I)
+# A loan spread/floor is a single-digit percentage; anything above this is not a
+# rate (it's a profit margin, a growth rate, etc.).
+_RATE_HI = 0.08
+# Context that means a 'margin'/'spread' label is NOT a loan rate — P&L / operating
+# margins above all (the exact failure: an EBITDA/gross margin read as a spread).
+_RE_RATE_NOISE = re.compile(
+    r"reference|cap rate|cap\b|growth|exit|going.?in|escalat|noi|occup|vacan|type|stress|yield"
+    r"|p\s*&\s*l|pnl|profit|gross|ebitda|\bgop\b|nightclub|revenue|\bincome\b|operating",
+    re.I)
+
+
+def _carried_spread(grids: dict) -> dict | None:
+    """Dominant value of a per-period spread/margin row carried through the model.
+    >=6 rate-like cells (0.1%–25%) qualifies it as a carried series, not a one-off
+    input; returns the most-common value (the spread it runs on). {value, source}."""
+    from collections import Counter
+    best = None  # ((length, coverage), value, source)
+    for sheet, grid in grids.items():
+        for r, row in enumerate(grid):
+            label = next((str(c) for c in row[:5] if isinstance(c, str) and c.strip()), "")
+            if not (label and _RE_SPREAD_LBL.search(label)) or _RE_RATE_NOISE.search(f"{sheet} {label}"):
+                continue
+            vals = [v for v in row if isinstance(v, (int, float))
+                    and not isinstance(v, bool) and 0.001 < v < _RATE_HI]
+            if len(vals) < 6:
+                continue
+            mode_v, n = Counter(round(v, 5) for v in vals).most_common(1)[0]
+            key = (len(vals), n / len(vals))
+            if best is None or key > best[0]:
+                best = (key, float(mode_v), f"{sheet}!row{r + 1}")
+    return {"value": best[1], "source": best[2]} if best else None
+
+
+def _rate_floor(grids: dict) -> dict | None:
+    """A rate floor from a 'floor'-labelled cell — the nearest rate-like number to
+    its right (a floor is usually a single input, not a series). {value, source}."""
+    for sheet, grid in grids.items():
+        for r, row in enumerate(grid):
+            for c, v in enumerate(row):
+                if not (isinstance(v, str) and _RE_FLOOR.search(v) and len(v) < 30):
+                    continue
+                if _RE_RATE_NOISE.search(f"{sheet} {v}"):
+                    continue
+                for x in row[c + 1:c + 6]:
+                    if isinstance(x, (int, float)) and not isinstance(x, bool) and 0.005 < x < _RATE_HI:
+                        return {"value": float(x), "source": f"{sheet}!row{r + 1}"}
+    return None
+
+
+def _rate_structure(grids: dict) -> dict:
+    """Spread + floor for the floating-rate summary line. Each {value, source} or
+    absent. Display-only; never feeds a return calc."""
+    out: dict[str, Any] = {}
+    sp = _carried_spread(grids)
+    fl = _rate_floor(grids)
+    if sp:
+        out["spread"] = sp
+    if fl:
+        out["floor"] = fl
+    return out
+
+
 def build_deal_truth(file_path: str | Path) -> dict[str, Any]:
     file_path = Path(file_path)
     m = build_workbook_map(file_path)
@@ -1166,7 +1235,10 @@ def build_deal_truth(file_path: str | Path) -> dict[str, Any]:
 
     # Floating- vs fixed-rate classification (the interest-rate check) — a floating
     # deal's levered return is exposed to rate moves, so flag it.
-    rate_type = _detect_rate_type(_load_grids(file_path))
+    _rate_grids = _load_grids(file_path)
+    rate_type = _detect_rate_type(_rate_grids)
+    if rate_type["type"] in ("floating", "fixed"):
+        rate_type["structure"] = _rate_structure(_rate_grids)
     if rate_type["type"] == "floating":
         guardrails.append({
             "code": "floating_rate",
