@@ -170,10 +170,11 @@ def build_analysis(file_path: str | Path, dt: dict | None = None) -> dict[str, A
     # NOI trajectory, the CapEx line, AND the going-in cap (which must divide a
     # going-in NOI that is in the SAME full-dollar units as total cost).
     try:
-        from cashflow_rollup import rollup_model, concept_trajectories
-        traj = _reconcile_operating_units(concept_trajectories(rollup_model(file_path)), can)
+        from cashflow_rollup import rollup_model, concept_trajectories, concept_components
+        _ru = rollup_model(file_path)
+        traj = _reconcile_operating_units(concept_trajectories(_ru), can)
     except Exception:
-        traj = {}
+        traj, _ru = {}, None
 
     # Exit NOI = the 12 months FORWARD of the sale month (what the exit price is
     # struck on), not the last proforma year — matters on short holds that sell
@@ -187,6 +188,13 @@ def build_analysis(file_path: str | Path, dt: dict | None = None) -> dict[str, A
         if isinstance(ex, (int, float)):
             traj = dict(traj)
             traj["noi"] = {**noi_t, "exit": ex}
+
+    # Tier-2 operating components (foot-validated) for the interpretation layer.
+    try:
+        from cashflow_rollup import concept_components
+        components = concept_components(_ru, traj) if _ru else {}
+    except Exception:
+        components = {}
 
     # --- Capital Structure ------------------------------------------------
     cs = ["#### Capital Structure"]
@@ -332,7 +340,8 @@ def build_analysis(file_path: str | Path, dt: dict | None = None) -> dict[str, A
     order = ["capital_structure", "return_profile", "cash_flow", "capex", "summary_check"]
     md = "### Deal Analysis — grounded in the cash-flow model\n\n" + \
         "\n\n".join(sections[k] for k in order if k in sections)
-    return {"ok": True, "md": md, "sections": sections, "dt": dt, "traj": traj}
+    return {"ok": True, "md": md, "sections": sections, "dt": dt,
+            "traj": traj, "components": components}
 
 
 if __name__ == "__main__":

@@ -230,6 +230,85 @@ def concept_trajectories(rollup: dict) -> dict[str, dict]:
     return out
 
 
+# A subtotal / structural row — NOT a leaf component (skip to avoid double-count).
+_RE_SUBTOTAL = re.compile(r"\btotal\b|net operating|\bnoi\b|effective gross|"
+                          r"potential gross|scheduled|gross revenue|gross income", re.I)
+
+
+def _row_of(traj_entry: dict) -> tuple[str | None, int | None]:
+    src = str((traj_entry or {}).get("source", ""))
+    if "!row" not in src:
+        return None, None
+    sheet, _, r = src.partition("!row")
+    try:
+        return sheet, int(r)
+    except ValueError:
+        return sheet, None
+
+
+def concept_components(rollup: dict, traj: dict) -> dict[str, dict]:
+    """Tier-2 breakdown: the COMPONENT leaf lines that make up revenue / opex, read
+    POSITIONALLY off the anchor sheet (only the totals are concept-tagged; the leaves
+    are not). Opex leaves sit between the revenue total and the opex total; revenue
+    leaves sit above the revenue total. Subtotal rows are skipped to avoid double-
+    counting, and a deterministic FOOT-CHECK (Sigma leaves ~ validated total) marks
+    whether the breakdown is trustworthy — GPT narrates only what foots.
+
+    Scaled to the reconciled trajectory's full-$ units (via the picked line's raw
+    stabilized). `traj` is the reconciled (full-$) trajectory."""
+    items = rollup.get("line_items", [])
+    by_key = {(it["sheet"], it["row"]): it for it in items}
+    out: dict[str, dict] = {}
+    rev_sheet, rev_row = _row_of(traj.get("revenue"))
+    opex_sheet, opex_row = _row_of(traj.get("opex"))
+
+    def build(concept, sheet, total_row, lo, hi):
+        picked = by_key.get((sheet, total_row))
+        if not picked:
+            return None
+        raw_total = _full_year_value(picked, "stabilized")
+        scaled_total = traj[concept]["stabilized"]
+        if not raw_total or not scaled_total:
+            return None
+        scale = scaled_total / raw_total
+        comps = []
+        for it in items:
+            if it["sheet"] != sheet or not (lo < it["row"] < hi):
+                continue
+            if not _is_operating_row(it["label"]) or _RE_SUBTOTAL.search(it["label"]):
+                continue
+            stab = _full_year_value(it, "stabilized")
+            if stab is None or abs(stab) < 1:
+                continue
+            gi = _full_year_value(it, "going_in")
+            comps.append({
+                "label": it["label"], "source": f"{sheet}!row{it['row']}",
+                "stabilized": stab * scale,
+                "going_in": (gi * scale) if gi is not None else None,
+                "by_year": {y: v * scale for y, v in it["by_year"].items()},
+                "share": stab / raw_total,
+            })
+        comps.sort(key=lambda c: -abs(c["stabilized"]))
+        foot = sum(c["stabilized"] for c in comps)
+        footed = abs(foot - scaled_total) / abs(scaled_total) <= 0.03
+        return {"total": scaled_total, "components": comps,
+                "footed": footed, "foot_sum": foot, "n": len(comps)}
+
+    # OPEX: leaves between the revenue total and the opex total (clean, flat).
+    if opex_sheet and opex_row:
+        lo = rev_row if (rev_sheet == opex_sheet and rev_row and rev_row < opex_row) else 0
+        r = build("opex", opex_sheet, opex_row, lo, opex_row)
+        if r:
+            out["opex"] = r
+    # REVENUE: leaves above the revenue total (hierarchical — may not foot; the
+    # foot-check flags it and the caller simply won't assert an unfooted breakdown).
+    if rev_sheet and rev_row:
+        r = build("revenue", rev_sheet, rev_row, 0, rev_row)
+        if r:
+            out["revenue"] = r
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Corpus harness — roll up each model's engine and show the NOI/rev/opex trend
 # ---------------------------------------------------------------------------
