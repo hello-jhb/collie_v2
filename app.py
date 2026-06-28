@@ -1287,66 +1287,37 @@ def _ensure_agent_grounded(agent: AgentSession, batch_id) -> None:
         fact_lines.append(f"- {rec.get('metric_name', name)}: {disp}{src}{flag}")
     facts_block = "\n".join(fact_lines) if fact_lines else "(no metrics resolved yet)"
 
-    # Canonical deal truth (validated from the cash flow) + the guardrails that
-    # bind what may be asserted. This is the authoritative fact set; it overrides
-    # the brief facts where they differ.
-    truth_block, guard_block = "", ""
+    # The validated FACT SHEET — the SAME object the Investment Read runs off (reuse
+    # the cached one). It carries the full-$ trajectory, foot-validated components,
+    # archetype, computed claims, and the FILTERED guardrails (the broken noi/rate
+    # conflict rails removed). This is the authoritative grounding; the bounded_metrics
+    # above are kept only as lower-confidence, cell-derived supplements it overrides.
     dt = _ensure_deal_truth(batch_id)
-    if dt and not dt.get("error"):
-        from deal_analysis import _money as _m
-        # The validated, full-$ operating trajectory — the SAME source the Deal
-        # Analysis panel shows. The canonical noi/revenue/opex POINT-facts are raw
-        # summary cells (often conflicted and in $000s), so they are NOT seeded; the
-        # trajectory is authoritative for these concepts.
-        traj = ((st.session_state.get("deal_analysis") or {}).get("traj")
-                if st.session_state.get("deal_analysis_batch") == batch_id else None)
-        if traj is None:
-            try:
-                from deal_analysis import build_analysis
-                traj = (build_analysis(UPLOAD_DIR / files[0], dt=dt) or {}).get("traj")
-            except Exception:
-                traj = None
-        _OPERATING = {"noi", "revenue", "opex"}   # covered by the trajectory below
-        tl = []
-        for c, info in (dt.get("canonical") or {}).items():
-            if c in _OPERATING:
-                continue
-            mark = " [CONFLICT — disclose]" if info.get("conflict") else ""
-            tl.append(f"- {_DT_LABELS.get(c, c)}: {_fmt_canon(c, info['value'])} "
-                      f"({info.get('source','')}){mark}")
-        h = dt.get("hold")
-        if h and h.get("months"):
-            early = (f" (sells at month {h['months']} of a {h['model_months']}-month "
-                     "model — use the hold, not the model length)"
-                     if h.get("sells_before_model_end") else "")
-            tl.append(f"- Hold period: {h['months']} months / {h['years']:g} years{early}")
-        for concept, label in (("noi", "NOI"), ("capex", "CapEx / reserves")):
-            t = (traj or {}).get(concept) or {}
-            if isinstance(t.get("stabilized"), (int, float)):
-                line = (f"- {label} (validated from the cash flow, FULL DOLLARS — "
-                        f"authoritative; raw cells are often in $000s, do NOT use them): "
-                        f"{_m(t.get('going_in'))} going-in → {_m(t.get('stabilized'))} "
-                        f"stabilized → {_m(t.get('exit'))} exit")
-                by_year = t.get("by_year") or {}
-                if concept == "noi" and by_year:
-                    line += ("\n  Annual " + label + " by calendar year: "
-                             + ", ".join(f"{y} {_m(v)}" for y, v in sorted(by_year.items())))
-                tl.append(line)
-        if tl:
-            truth_block = ("\n\nCANONICAL DEAL TRUTH (validated from the cash flow — "
-                           "PREFER these over any other source):\n" + "\n".join(tl))
-        grs = dt.get("guardrails") or []
-        if grs:
-            guard_block = ("\n\nBINDING CONSTRAINTS — obey every one; never contradict them:\n"
-                           + "\n".join(f"- {g['message']}" for g in grs))
+    fs_block = ""
+    fs = (st.session_state.get("investment_read") or {}).get("fact_sheet")
+    if not fs and dt and not dt.get("error"):
+        try:
+            from interpretation import assemble_fact_sheet
+            perf = _ensure_perf_vs_plan(batch_id) if st.session_state.actuals_filenames else None
+            perf = perf if (perf and perf.get("ok")) else None
+            fs = assemble_fact_sheet(UPLOAD_DIR / files[0], dt=dt, perf=perf)
+        except Exception:
+            fs = None
+    if fs and fs.get("ok"):
+        from interpretation import render_fact_sheet
+        fs_block = render_fact_sheet(fs)
 
     context = (
         "DEAL CONTEXT — the deal under review is already loaded; do NOT call "
         "ingest_to_ssot or run_deal_review again, that work is done.\n"
-        f"Uploaded & ingested file(s): {', '.join(files)}.\n"
-        f"SSOT layers present: {ssot.list_layers()}.\n\n"
-        f"Verified facts in the underwriting layer:\n{facts_block}"
-        f"{truth_block}{guard_block}\n\n"
+        f"Uploaded & ingested file(s): {', '.join(files)}.\n\n"
+        "═══ VALIDATED FACT SHEET — authoritative. Every number here is correct "
+        "(full dollars, conflict-resolved); PREFER it over any cell you might read. "
+        "It already contains the BINDING GUARDRAILS (obey every one, never contradict) "
+        "and the computed CLAIMS (explain them; do not flip an attribution):\n"
+        f"{fs_block}\n\n"
+        "Additional extracted metrics (cell-derived, LOWER confidence — the fact sheet "
+        f"OVERRIDES these where they differ; verify before relying on them):\n{facts_block}\n\n"
         "Answering rules: when the user names a metric or concept (e.g. \"what is "
         "exit price?\", \"cap rate?\", \"DSCR?\", \"exit cap?\") they mean THIS "
         "deal — answer with the value from the facts above, or read the model with "
@@ -1354,11 +1325,12 @@ def _ensure_agent_grounded(agent: AgentSession, batch_id) -> None:
         "textbook definition unless the user explicitly asks what a term means. If "
         "a value genuinely isn't in the model after you've looked, say so plainly "
         "and name where you looked.\n"
-        "NOI / revenue / opex: ALWAYS use the validated trajectory in CANONICAL DEAL "
-        "TRUTH above (full dollars). Do NOT read raw NOI cells with read_sheet/"
-        "search_file — the model holds many conflicting NOI cells, usually in $000s, "
-        "and they are wrong/unscaled. For an NOI bridge or annual-NOI question, use "
-        "the going-in→stabilized→exit values and the annual-by-year series given above.\n"
+        "NOI / revenue / opex: ALWAYS use the validated trajectory in the FACT SHEET "
+        "above (full dollars). Do NOT read raw NOI cells with read_sheet/search_file — "
+        "the model holds many conflicting NOI cells, usually in $000s, and they are "
+        "wrong/unscaled. For an NOI bridge or annual-NOI question, use the going-in→"
+        "stabilized→exit values and the annual-by-year series given above. For a "
+        "'what's driving opex' question, use the FOOT-VALIDATED opex components.\n"
         "Return-impact math (a capex overrun, extra spend, or more equity → effect on "
         "IRR / equity multiple): call run_what_if_capex to compute it deterministically. "
         "Do NOT estimate, describe it qualitatively, or say you'd need to re-run the "
