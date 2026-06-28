@@ -389,7 +389,82 @@ def render_fact_sheet(fs: dict) -> str:
     return "\n".join(L)
 
 
+# ---------------------------------------------------------------------------
+# The Investment Read — GPT narrates the fact sheet (Phase 5). GPT writes prose
+# only; the claims/numbers are pre-computed and binding. Deterministic fallback
+# when no API key, so it always renders (like deal_analysis).
+# ---------------------------------------------------------------------------
+_SYSTEM_PROMPT = """\
+You are an experienced real-estate asset manager writing the opening of an investment-
+committee memo. You are given a VALIDATED Fact Sheet (every number is already correct),
+a set of computed CLAIMS, and binding GUARDRAILS. Your job is to turn them into a concise
+investment READ — what this is, what changed, why, what deserves attention, what's next.
+
+HARD RULES (a violation makes the read worthless):
+1. Narrate ONLY from the Fact Sheet and Claims. NEVER invent, recompute, or alter a number.
+2. Obey EVERY guardrail. Never contradict one. They override your instincts.
+3. The Claims are your findings — do not flip an attribution or change a direction. Explain them.
+4. Apply the archetype lens when judging whether something is concerning or expected.
+5. Write investment prose, not a metric list. Tight. An analyst's voice, not a dashboard.
+6. Recommendations are JUDGMENT — phrase them as such, proportional to the issue.
+7. If mode is "acquisition" there are no actuals — do NOT discuss "what changed" or performance.
+
+OUTPUT — exactly these three sections, markdown headers:
+## Investment Snapshot
+   One short paragraph: the deal, its archetype, and where it sits in the business plan.
+## Key Investment Findings
+   3–5 bullets, each an evidence-backed observation drawn from the Claims (what changed / why it
+   matters). Lead with the most important.
+## Attention & Recommendations
+   1–2 issues that most affect future performance or risk, then 1–2 practical next steps.
+"""
+
+
+def _prompt_payload(fs: dict) -> str:
+    import json
+    lines = [f"MODE: {fs['mode']}", "", "FACT SHEET (validated — do not alter):",
+             render_fact_sheet(fs), "", "CLAIMS (your findings — explain, do not change):"]
+    for c in fs.get("claims", []):
+        lines.append(json.dumps({k: c[k] for k in
+                     ("id", "headline", "what_changed", "why", "why_matters", "implication",
+                      "direction", "confidence") if c.get(k)}, default=str))
+    lines += ["", "GUARDRAILS (binding — never contradict):"]
+    lines += [f"- {g}" for g in fs.get("guardrails", [])]
+    return "\n".join(lines)
+
+
+def _deterministic_read(fs: dict) -> str:
+    a = fs["deal"]["archetype"]
+    out = ["## Investment Snapshot",
+           f"{a['label'].title()} deal ({a['confidence']} confidence). {a.get('lens','')}",
+           "", "## Key Investment Findings"]
+    for c in fs.get("claims", []):
+        out.append(f"- **{c['headline']}** — {c.get('why','')}"
+                   + (f" {c['implication']}" if c.get("implication") else ""))
+    out += ["", "## Attention & Recommendations",
+            "_(Narrative read requires an API key; showing the computed findings above.)_"]
+    return "\n".join(out)
+
+
+def build_investment_read(file_path, dt=None, analysis=None, perf=None) -> dict[str, Any]:
+    """The Investment Read artifact. Assembles the fact sheet, then GPT narrates it
+    under the binding guardrails (deterministic fallback when no key)."""
+    fs = assemble_fact_sheet(file_path, dt=dt, analysis=analysis, perf=perf)
+    if not fs.get("ok"):
+        return {"ok": False, "reason": fs.get("reason"),
+                "md": f"> Investment read unavailable: {fs.get('reason')}"}
+    from scenarios._llm import llm_available, complete
+    if not llm_available():
+        return {"ok": True, "source": "deterministic", "fact_sheet": fs,
+                "md": _deterministic_read(fs)}
+    try:
+        md = complete(_SYSTEM_PROMPT, _prompt_payload(fs), temperature=0.2)
+    except Exception as e:                                  # pragma: no cover - defensive
+        return {"ok": True, "source": "deterministic", "fact_sheet": fs,
+                "md": _deterministic_read(fs), "note": f"{type(e).__name__}: {e}"}
+    return {"ok": True, "source": "gpt", "fact_sheet": fs, "md": md}
+
+
 if __name__ == "__main__":
     import sys
-    fs = assemble_fact_sheet(sys.argv[1])
-    print(render_fact_sheet(fs))
+    print(render_fact_sheet(assemble_fact_sheet(sys.argv[1])))
