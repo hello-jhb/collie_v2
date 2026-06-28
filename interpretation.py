@@ -85,6 +85,140 @@ def _classify_archetype(dt: dict, traj: dict) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Claims — the load-bearing conclusions, computed deterministically. GPT narrates
+# these; it never derives them. Each: {id, headline, what_changed, why,
+# why_matters, implication, direction, confidence, sources, guardrail}.
+# ---------------------------------------------------------------------------
+_NOI_VARIANCE_GATE = 0.03   # below this, NOI is "tracking" — don't dissect drivers
+
+
+def _k(v):
+    return f"${abs(v)/1e3:,.0f}K" if abs(v) < 1e6 else f"${abs(v)/1e6:.1f}M"
+
+
+def _performance_claims(fs: dict, perf: dict) -> list[dict]:
+    var = perf.get("variance") or {}
+    items = perf.get("items") or {}
+    noi_pct, noi_delta = var.get("pct"), var.get("delta")
+    months = var.get("n")
+    conf = (f"{months}-mo: early signal" if (months and months < 6)
+            else f"{months}-mo trend" if months else "—")
+    lens = fs["deal"]["archetype"].get("lens", "")
+    claims: list[dict] = []
+
+    # gap_driver — GATED on the NOI variance (user rule: >3% -> read rev & exp).
+    if isinstance(noi_pct, (int, float)) and abs(noi_pct) <= _NOI_VARIANCE_GATE:
+        claims.append({
+            "id": "gap_driver", "direction": "on_plan", "confidence": conf,
+            "headline": "NOI is tracking to plan",
+            "what_changed": f"NOI is within {int(_NOI_VARIANCE_GATE*100)}% of plan "
+                            f"({noi_pct*100:+.1f}%).",
+            "why": "No material variance to dissect.", "why_matters": "",
+            "implication": "", "sources": ["variance"],
+            "guardrail": f"NOI is on plan ({noi_pct*100:+.1f}%); do not over-dramatize a "
+                         "small variance."})
+    elif isinstance(noi_pct, (int, float)):
+        opex_delta = items.get("opex_delta") or 0                     # +ve = opex OVER plan
+        rev_delta = items.get("revenue_delta")
+        rev_dom = (rev_delta is not None and abs(rev_delta) > abs(opex_delta))
+        direction = "revenue" if rev_dom else "expense"
+        rev_ahead = (rev_delta or 0) >= 0
+        movers = (items.get("movers") or [])[:3]
+        mv = "; ".join(f"{it['label']} {'+' if it['delta'] > 0 else '−'}{_k(it['delta'])}"
+                       for it in movers)
+        below = noi_pct < 0
+        claims.append({
+            "id": "gap_driver", "direction": direction, "confidence": conf,
+            "headline": f"NOI is {abs(noi_pct)*100:.1f}% {'below' if below else 'above'} "
+                        f"plan — {direction}-driven",
+            "what_changed": f"NOI is {abs(noi_pct)*100:.1f}% {'below' if below else 'above'} plan.",
+            "why": (f"Revenue is {'+' if rev_ahead else '−'}{_k(rev_delta or 0)} vs plan; "
+                    f"opex is {'+' if opex_delta >= 0 else '−'}{_k(opex_delta)} vs plan — "
+                    f"the gap is {direction}-driven."),
+            "why_matters": lens,
+            "implication": f"Movers: {mv}." if mv else "",
+            "sources": ["variance", "items"],
+            "guardrail": (f"The NOI gap is {direction.upper()}-driven; revenue is "
+                          f"{'AHEAD of' if rev_ahead else 'BEHIND'} plan. Do not attribute the "
+                          f"gap to {'expenses' if direction == 'revenue' else 'revenue'}.")})
+
+    # returns_resilient
+    lev = next((r for r in (perf.get("returns") or []) if r["leg"] == "levered"
+                and r.get("blended_irr") is not None), None)
+    if lev:
+        bps = round((lev["blended_irr"] - lev["projected_irr"]) * 10000)
+        claims.append({
+            "id": "returns_resilient", "direction": "down" if bps < 0 else "up",
+            "confidence": conf,
+            "headline": f"Levered IRR tracking {lev['blended_irr']*100:.2f}% "
+                        f"(underwritten {lev['projected_irr']*100:.2f}%)",
+            "what_changed": f"Levered IRR {lev['projected_irr']*100:.2f}% → "
+                            f"{lev['blended_irr']*100:.2f}% ({bps:+d} bps).",
+            "why": f"Only the {months or 0} elapsed months reflect actuals; the rest of the "
+                   "plan is held unchanged (capex & financing at plan).",
+            "why_matters": "Realized impact is modest; the cushion erodes if the variance "
+                           "persists into stabilization.",
+            "implication": "", "sources": ["returns"],
+            "guardrail": f"Levered IRR is tracking {'DOWN' if bps < 0 else 'UP'} "
+                         f"({lev['projected_irr']*100:.2f}% → {lev['blended_irr']*100:.2f}%); "
+                         f"do not say returns {'improved' if bps < 0 else 'declined'}."})
+    return claims
+
+
+def _acquisition_claims(fs: dict) -> list[dict]:
+    a = fs["deal"]["archetype"]
+    t = fs["deal"]["targets"]
+    nb = t["noi_bridge"]
+    claims: list[dict] = []
+
+    def pct(v):
+        return f"{v*100:.1f}%" if isinstance(v, (int, float)) else "—"
+
+    def m(v):
+        return _k(v) if isinstance(v, (int, float)) else "—"
+
+    # thesis
+    growth = a["signals"].get("noi_growth")
+    claims.append({
+        "id": "thesis", "direction": a["label"], "confidence": a["confidence"],
+        "headline": f"{a['label'].title()} — NOI {m(nb['going_in'])} → {m(nb['stabilized'])}"
+                    + (f" ({growth*100:+.0f}%)" if isinstance(growth, (int, float)) else ""),
+        "what_changed": "", "why": a["lens"],
+        "why_matters": (f"Going-in NOI is {a['signals'].get('going_in_noi_pct_of_stabilized', '?')} "
+                        "of stabilized — the value to be created is the ramp."),
+        "implication": (f"Underwritten exit {m(t['sale_price'])} at a {pct(t['exit_cap'])} cap."),
+        "sources": ["archetype", "noi_bridge"],
+        "guardrail": (f"Read this as a {a['label']} deal (lens above)."
+                      + (" Note: underwritten as development but hold-period NOI is flat — "
+                         "flag the strategy/behaviour mismatch." if a.get("strategy_conflict") else ""))})
+    # return_profile
+    claims.append({
+        "id": "return_profile", "direction": "", "confidence": "T1",
+        "headline": f"Levered IRR {pct(t['levered_irr'])} · EM {t.get('levered_em')}",
+        "what_changed": "", "why": f"Unlevered {pct(t['unlevered_irr'])}; LTC {pct(t['ltc'])}.",
+        "why_matters": "", "implication": "", "sources": ["targets"], "guardrail": ""})
+    # structural_risk — from rate + leverage + lens
+    fin = fs["deal"]["strategy"]["financing"]
+    if fin == "floating":
+        claims.append({
+            "id": "structural_risk", "direction": "rate", "confidence": "T1",
+            "headline": "Floating-rate exposure",
+            "what_changed": "", "why": "Levered return rides the rate path; "
+                            f"floor {pct(fs['deal']['strategy']['rate'].get('floor'))}.",
+            "why_matters": "A NOI shortfall compresses DSCR headroom; with floating debt a "
+                           "higher-rate environment compounds it.",
+            "implication": "", "sources": ["rate_type"],
+            "guardrail": "Financing is FLOATING; do not assume fixed-rate."})
+    return claims
+
+
+def build_claims(fs: dict, perf: dict | None = None) -> list[dict]:
+    if fs.get("mode") == "performance" and perf:
+        return _performance_claims(fs, perf)
+    return _acquisition_claims(fs)
+
+
+# ---------------------------------------------------------------------------
 # Fact-sheet assembly (deterministic — no GPT).
 # ---------------------------------------------------------------------------
 def _v(can: dict, c: str):
@@ -191,9 +325,13 @@ def assemble_fact_sheet(file_path: str | Path, dt: dict | None = None,
         "months_of_actuals": (perf.get("variance") or {}).get("n") if perf else None,
     }
 
-    return {"ok": True, "version": FACT_SHEET_VERSION, "mode": mode,
-            "deal": deal, "operating": operating, "performance": performance,
-            "guardrails": guardrails, "confidence": confidence}
+    fs = {"ok": True, "version": FACT_SHEET_VERSION, "mode": mode,
+          "deal": deal, "operating": operating, "performance": performance,
+          "guardrails": guardrails, "confidence": confidence}
+    # Claims (computed) + their derived guardrails — the binding layer GPT obeys.
+    fs["claims"] = build_claims(fs, perf)
+    fs["guardrails"] = guardrails + [c["guardrail"] for c in fs["claims"] if c.get("guardrail")]
+    return fs
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +374,14 @@ def render_fact_sheet(fs: dict) -> str:
         pf = fs["performance"]
         L.append(f"PERFORMANCE: {pf['as_of_months']} mo · NOI {P(pf['noi_variance_pct'])} vs plan"
                  f" · def-match {pf['definition_match']}")
+    L.append("")
+    L.append(f"CLAIMS ({len(fs.get('claims', []))}):")
+    for cl in fs.get("claims", []):
+        L.append(f"  [{cl['id']}] {cl['headline']}  ({cl.get('confidence', '')})")
+        if cl.get("why"):
+            L.append(f"      why: {cl['why']}")
+        if cl.get("implication"):
+            L.append(f"      → {cl['implication']}")
     if fs["guardrails"]:
         L.append("GUARDRAILS:")
         for g in fs["guardrails"][:6]:
