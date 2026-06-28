@@ -239,6 +239,11 @@ _SESSION_DEFAULTS: dict = {
     "actuals_filenames":     set(),
     "perf_vs_plan":          None,
     "perf_vs_plan_key":      None,
+    # --- Investment Read (interpretation.py): GPT narrates the validated fact
+    # sheet (+ perf, when actuals exist) into an IC-memo-style read; leads the
+    # Outcome. Cached per (model + actuals). ---
+    "investment_read":       None,
+    "investment_read_key":   None,
     # --- Deal Analyzer 3-column frontend (deal_review) ---
     # Batch whose deal context has been seeded into the chat agent's history
     # (so follow-up Q&A is grounded in THIS model, not answered generically).
@@ -959,6 +964,11 @@ def _customer_outcome(batch_id, dt, agent) -> None:
                    + (f" ({dt.get('error')})" if dt and dt.get("error") else ""))
         return
 
+    # The Investment Read leads — the synthesized IC-memo read; Deal Analysis below
+    # is the supporting detail it's grounded in.
+    _customer_analysis(batch_id, dt)            # warm the deal-analysis cache first
+    _render_investment_read(batch_id, dt)
+
     with st.container(border=True):
         if dt.get("engine_found", True):
             st.markdown(":green[✓ Reconstructed & validated from the cash flow]")
@@ -1107,9 +1117,12 @@ def _render_outcome_column(agent: AgentSession, batch_id, confirmed: bool, analy
         st.info("Upload an underwriting workbook (left) to begin.")
         return None
 
-    # Optional add-on: if actuals statement(s) were uploaded, lead the Outcome with
-    # the plan-vs-actual variance ("How are we tracking?"). Absent statements, this
-    # renders nothing and the Deal Analyzer behaves exactly as before (standalone).
+    # The Investment Read leads the Outcome: the synthesized IC-memo read off the
+    # validated fact sheet (+ perf, when actuals are present). The detailed panels
+    # (variance, deal analysis) follow as the supporting evidence it's grounded in.
+    _render_investment_read(batch_id, _ensure_deal_truth(batch_id))
+
+    # If actuals statement(s) were uploaded, show the plan-vs-actual variance detail.
     if st.session_state.actuals_filenames:
         _render_perf_vs_plan(batch_id)
 
@@ -1983,6 +1996,48 @@ def _render_perf_vs_plan(batch_id) -> None:
                        f"{res.get('reason', '')}")
             for f in (res.get("validation") or {}).get("failures", [])[:6]:
                 st.markdown(f"- ✗ {f.get('identity')} [{f.get('period')}]: {f.get('detail')}")
+
+
+def _ensure_investment_read(batch_id, dt):
+    """The Investment Read (interpretation layer) — once per (model + actuals). GPT
+    narrates the validated fact sheet (+ perf, in performance mode) under binding
+    guardrails; deterministic fallback when no API key. Reuses the cached deal
+    analysis + perf so it never recomputes them."""
+    files = sorted(st.session_state.uploaded_filenames)
+    if not files or not dt or dt.get("error") or not dt.get("engine_found", True):
+        return None
+    actuals = sorted(st.session_state.actuals_filenames)
+    key = (frozenset(files), frozenset(actuals))
+    if (st.session_state.get("investment_read_key") == key
+            and st.session_state.get("investment_read")):
+        return st.session_state.investment_read
+    analysis = (st.session_state.get("deal_analysis")
+                if st.session_state.get("deal_analysis_batch") == batch_id else None)
+    perf = _ensure_perf_vs_plan(batch_id) if actuals else None
+    perf = perf if (perf and perf.get("ok")) else None
+    from interpretation import build_investment_read
+    with st.spinner("Writing the investment read…"):
+        try:
+            res = build_investment_read(UPLOAD_DIR / files[0], dt=dt,
+                                        analysis=analysis, perf=perf)
+        except Exception as e:                             # pragma: no cover - defensive
+            res = {"ok": False, "reason": f"{type(e).__name__}: {e}"}
+    st.session_state.investment_read = res
+    st.session_state.investment_read_key = key
+    return res
+
+
+def _render_investment_read(batch_id, dt) -> None:
+    """LEADS the Outcome: the IC-memo-style read synthesized from the validated fact
+    sheet. The Deal Analysis panel below is the supporting detail."""
+    res = _ensure_investment_read(batch_id, dt)
+    if not res:
+        return
+    with st.container(border=True):
+        if res.get("ok"):
+            st.markdown(res["md"])
+        else:
+            st.caption(f"Investment read unavailable: {res.get('reason', '')}")
 
 
 def _ensure_investment_view(batch_id, brief: dict, scored: dict) -> dict:
