@@ -232,6 +232,64 @@ def _traj_pts(t: dict | None) -> dict | None:
             "exit": t.get("exit"), "by_year": t.get("by_year"), "source": t.get("source")}
 
 
+def _cashflow_metrics(file_path, dt: dict) -> dict[str, Any]:
+    """Metrics derived from the validated cash-flow streams (the summary grid asks
+    for these): debt & equity AT EXIT, annual debt service, levered CF, leveraged
+    cash-on-cash. All from find_spine's matched streams — no GPT, no cell reads.
+    Occupancy is NOT here: it's an operating assumption, not in the cash flow."""
+    from collections import defaultdict
+    from cashflow_spine import find_spine
+    can = dt.get("canonical", {})
+    out: dict[str, Any] = {"equity_at_exit": None, "debt_at_exit": None,
+                           "levered_cf_by_year": None, "levered_cf_stabilized": None,
+                           "debt_service_stabilized": None, "leveraged_coc": None,
+                           "occupancy": None}
+    try:
+        sp = find_spine(Path(file_path))
+    except Exception:
+        return out
+    lev = (sp.matched.get("levered") or {}).get("flows")
+    unl = (sp.matched.get("unlevered") or {}).get("flows")
+    if not lev:
+        return out
+
+    acq = min(lev, key=lambda x: x[1])                 # equity outflow at close
+    lev_sale = max(lev, key=lambda x: x[1])            # equity proceeds at exit
+    equity = _v(can, "equity") or abs(acq[1]) or None
+    if lev_sale[1] > 0:
+        out["equity_at_exit"] = lev_sale[1]
+        if unl:
+            unl_sale = max(unl, key=lambda x: x[1])    # gross sale to the project
+            if unl_sale[1] > out["equity_at_exit"]:
+                out["debt_at_exit"] = unl_sale[1] - out["equity_at_exit"]
+
+    # Operating levered CF per year — distributions to equity, excluding the
+    # acquisition outflow and the sale proceeds.
+    ann: dict[int, float] = defaultdict(float)
+    for d, v in lev:
+        if (d, v) == acq or (d, v) == lev_sale:
+            continue
+        ann[d.year] += v
+    by_year = {y: round(v) for y, v in sorted(ann.items()) if abs(v) > 1}
+    out["levered_cf_by_year"] = by_year or None
+    pos = {y: v for y, v in by_year.items() if v > 0}
+    if pos:
+        stab_year = max(pos, key=pos.get)              # most-stabilized operating year
+        out["levered_cf_stabilized"] = pos[stab_year]
+        if equity:
+            out["leveraged_coc"] = pos[stab_year] / equity
+        # Debt service = the unlevered-minus-levered wedge in that operating year
+        # (clean in non-capex/non-draw months). Sanity-gated against the loan size.
+        if unl:
+            ld = {d.isoformat()[:7]: v for d, v in lev}
+            ud = {d.isoformat()[:7]: v for d, v in unl}
+            wedge = sum(ud[k] - ld.get(k, 0) for k in ud if k.startswith(str(stab_year)) and k in ld)
+            debt = _v(can, "debt")
+            if wedge > 0 and (not debt or wedge < 0.20 * abs(debt)):
+                out["debt_service_stabilized"] = wedge
+    return out
+
+
 def assemble_fact_sheet(file_path: str | Path, dt: dict | None = None,
                         analysis: dict | None = None,
                         perf: dict | None = None) -> dict[str, Any]:
@@ -281,6 +339,7 @@ def assemble_fact_sheet(file_path: str | Path, dt: dict | None = None,
             "equity": _v(can, "equity"), "ltv": _v(can, "ltv"), "ltc": _v(can, "ltc"),
         },
     }
+    deal["targets"].update(_cashflow_metrics(file_path, dt))
 
     operating = {c: _traj_pts(traj.get(c)) for c in ("noi", "revenue", "opex", "capex")}
     operating["components"] = {
