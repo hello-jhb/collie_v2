@@ -268,6 +268,8 @@ def assemble_fact_sheet(file_path: str | Path, dt: dict | None = None,
                      "floor": (struct.get("floor") or {}).get("value")},
         },
         "targets": {
+            "purchase_price": _v(can, "purchase_price"),
+            "capex": (traj.get("capex") or {}).get("stabilized"),
             "levered_irr": _v(can, "levered_irr"), "unlevered_irr": _v(can, "unlevered_irr"),
             "levered_em": _v(can, "equity_multiple"),
             "noi_bridge": {"going_in": (traj.get("noi") or {}).get("going_in"),
