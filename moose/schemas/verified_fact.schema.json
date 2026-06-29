@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://moose.local/schemas/verified_fact.schema.json",
+  "title": "Moose Verified Fact",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "fact_id",
+    "claim_id",
+    "metric_or_subject",
+    "verification_status",
+    "checks",
+    "caveats",
+    "source",
+    "created_at"
+  ],
+  "properties": {
+    "fact_id": {
+      "type": "string"
+    },
+    "claim_id": {
+      "type": "string"
+    },
+    "metric_or_subject": {
+      "type": "string"
+    },
+    "verification_status": {
+      "type": "string",
+      "enum": [
+        "verified",
+        "verified_with_caveat",
+        "needs_review",
+        "contradicted",
+        "rejected"
+      ]
+    },
+    "verified_value": {},
+    "unit": {
+      "type": ["string", "null"]
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "status"],
+        "properties": {
+          "name": {"type": "string"},
+          "status": {
+            "type": "string",
+            "enum": ["passed", "failed", "needs_review", "not_run"]
+          },
+          "details": {"type": "string"}
+        }
+      }
+    },
+    "notes": {
+      "type": ["string", "null"]
+    },
+    "caveats": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "source": {
+      "type": "string"
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

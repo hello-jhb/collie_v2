@@ -1,0 +1,213 @@
+# TODO(Day 1): These document definitions are v0 assumptions derived from domain_model.md.
+# Authoritativeness and recommended pipelines need validation against sample documents.
+document_types:
+  financial_model:
+    purpose: Quantify investment performance, valuation, scenarios, and cash flow.
+    likely_formats: [xlsx, xlsm, xls]
+    parent_functional_work: [acquisition_transaction_management, asset_management]
+    related_initiatives: [acquisition_process, quarterly_reforecast, refinancing, valuation_update, hold_sell_review]
+    lifecycle_stage: [acquisition, operations_ownership, disposition]
+    decision_layer: [asset, transaction, portfolio]
+    authoritative_for: [projected cash flow, assumptions, valuation sensitivities, return metrics]
+    expected_evidence: [NOI, IRR, equity multiple, purchase price, exit cap rate, debt terms]
+    recommended_pipeline: financial_model_pipeline
+  operating_statement:
+    purpose: Report historical property revenue, expenses, and NOI.
+    likely_formats: [xlsx, csv, pdf]
+    parent_functional_work: [asset_management, property_management]
+    related_initiatives: [annual_budget, quarterly_reforecast, lender_reporting, valuation_update, tax_appeal]
+    lifecycle_stage: [operations_ownership]
+    decision_layer: [property, asset]
+    authoritative_for: [actual revenue, actual expenses, actual NOI]
+    expected_evidence: [period, revenue line items, expense line items, NOI, variance]
+    recommended_pipeline: operating_statement_pipeline
+  rent_roll:
+    purpose: Report tenant occupancy, rent, lease dates, and space-level detail.
+    likely_formats: [xlsx, csv, pdf]
+    parent_functional_work: [asset_management, property_management]
+    related_initiatives: [leasing_campaign, lease_renewal_program, annual_budget, valuation_update]
+    lifecycle_stage: [operations_ownership]
+    decision_layer: [property, asset]
+    authoritative_for: [tenant roster, occupancy, lease expirations, in-place rent]
+    expected_evidence: [tenant, suite, square feet, rent, expiration date, occupancy]
+    recommended_pipeline: rent_roll_pipeline
+  lease:
+    purpose: Define tenant rights, obligations, economics, and dates.
+    likely_formats: [pdf, docx]
+    parent_functional_work: [asset_management, property_management]
+    related_initiatives: [lease_renewal_program, leasing_campaign]
+    lifecycle_stage: [operations_ownership]
+    decision_layer: [property, asset]
+    authoritative_for: [lease clauses, tenant obligations, rent schedule, options]
+    expected_evidence: [parties, premises, rent, commencement date, expiration date, options]
+    recommended_pipeline: lease_pipeline
+  loan_agreement:
+    purpose: Define financing terms, covenants, obligations, and maturity.
+    likely_formats: [pdf, docx]
+    parent_functional_work: [acquisition_transaction_management, asset_management]
+    related_initiatives: [refinancing, lender_reporting, acquisition_process]
+    lifecycle_stage: [acquisition, operations_ownership]
+    decision_layer: [transaction, asset]
+    authoritative_for: [loan terms, covenants, maturity, interest rate, reporting obligations]
+    expected_evidence: [principal, rate, maturity, covenants, reporting requirements]
+    recommended_pipeline: loan_agreement_pipeline
+  appraisal:
+    purpose: Provide third-party valuation and supporting market evidence.
+    likely_formats: [pdf]
+    parent_functional_work: [acquisition_transaction_management, asset_management, portfolio_management]
+    related_initiatives: [acquisition_process, valuation_update, hold_sell_review, tax_appeal, nav_update]
+    lifecycle_stage: [acquisition, operations_ownership, disposition]
+    decision_layer: [asset, portfolio, fund]
+    authoritative_for: [appraised value, valuation methods, market comps, cap rate]
+    expected_evidence: [value conclusion, cap rate, discount rate, comps, effective date]
+    recommended_pipeline: appraisal_pipeline
+  offering_memorandum:
+    purpose: Market an acquisition or disposition opportunity.
+    likely_formats: [pdf]
+    parent_functional_work: [acquisition_transaction_management]
+    related_initiatives: [acquisition_process, disposition_process]
+    lifecycle_stage: [acquisition, disposition]
+    decision_layer: [transaction]
+    authoritative_for: [seller or broker narrative, property overview, marketed assumptions]
+    expected_evidence: [property details, rent roll summary, financial summary, market narrative]
+    recommended_pipeline: offering_memorandum_pipeline
+  investment_memo:
+    purpose: Summarize investment recommendation, risks, and decision rationale.
+    likely_formats: [pdf, docx]
+    parent_functional_work: [acquisition_transaction_management]
+    related_initiatives: [acquisition_process]
+    lifecycle_stage: [acquisition]
+    decision_layer: [fund, portfolio, transaction]
+    authoritative_for: [recommendation, investment thesis, risk summary, committee decision]
+    expected_evidence: [thesis, returns, risks, sources and uses, recommendation]
+    recommended_pipeline: investment_memo_pipeline
+  business_plan:
+    purpose: Define asset strategy, operating plan, budget, leasing, capital work, and value creation.
+    likely_formats: [pdf, docx, pptx]
+    parent_functional_work: [asset_management]
+    related_initiatives: [annual_business_plan, hold_sell_review]
+    lifecycle_stage: [operations_ownership, development_value_creation]
+    decision_layer: [asset]
+    authoritative_for: [asset strategy, annual priorities, business plan assumptions]
+    expected_evidence: [strategy, budget, leasing plan, capital plan, risks]
+    recommended_pipeline: business_plan_pipeline
+  budget_workbook:
+    purpose: Set planned property or asset financial performance.
+    likely_formats: [xlsx, xlsm]
+    parent_functional_work: [asset_management]
+    related_initiatives: [annual_budget, annual_business_plan, capital_project]
+    lifecycle_stage: [operations_ownership]
+    decision_layer: [asset, property]
+    authoritative_for: [budgeted revenue, budgeted expenses, budgeted NOI, capital budget]
+    expected_evidence: [budget period, revenue assumptions, expense assumptions, capital budget]
+    recommended_pipeline: budget_workbook_pipeline
+  variance_report:
+    purpose: Explain actual performance versus budget, plan, or forecast.
+    likely_formats: [xlsx, pdf]
+    parent_functional_work: [asset_management]
+    related_initiatives: [quarterly_reforecast, annual_budget]
+    lifecycle_stage: [operations_ownership]
+    decision_layer: [asset, property]
+    authoritative_for: [variance explanations, actual to budget comparison]
+    expected_evidence: [actuals, budget, variance, commentary, period]
+    recommended_pipeline: variance_report_pipeline
+  property_management_report:
+    purpose: Report property operating status, tenant issues, maintenance, and collections.
+    likely_formats: [pdf, xlsx, docx]
+    parent_functional_work: [property_management, asset_management]
+    related_initiatives: [annual_business_plan, lender_reporting, lease_renewal_program]
+    lifecycle_stage: [operations_ownership]
+    decision_layer: [property]
+    authoritative_for: [property operating issues, tenant service, maintenance status]
+    expected_evidence: [occupancy, collections, work orders, tenant issues, operating commentary]
+    recommended_pipeline: property_management_report_pipeline
+  leasing_report:
+    purpose: Track leasing activity, prospects, expirations, and rent pipeline.
+    likely_formats: [xlsx, pdf]
+    parent_functional_work: [asset_management, property_management]
+    related_initiatives: [leasing_campaign, lease_renewal_program]
+    lifecycle_stage: [operations_ownership]
+    decision_layer: [property, asset]
+    authoritative_for: [leasing pipeline, prospects, lease-up status]
+    expected_evidence: [prospects, stages, square feet, rent, expiration, probability]
+    recommended_pipeline: leasing_report_pipeline
+  capital_project_tracker:
+    purpose: Track capital project scope, budget, schedule, and status.
+    likely_formats: [xlsx, csv, pdf]
+    parent_functional_work: [asset_management, property_management]
+    related_initiatives: [capital_project, annual_business_plan]
+    lifecycle_stage: [development_value_creation, operations_ownership]
+    decision_layer: [asset, property]
+    authoritative_for: [project budget, commitments, schedule, status]
+    expected_evidence: [project, budget, actual cost, committed cost, schedule, status]
+    recommended_pipeline: capital_project_tracker_pipeline
+  portfolio_report:
+    purpose: Summarize performance, risk, valuation, and priorities across assets.
+    likely_formats: [pdf, pptx, xlsx]
+    parent_functional_work: [portfolio_management, fund_management]
+    related_initiatives: [investor_reporting, hold_sell_review, valuation_update]
+    lifecycle_stage: [operations_ownership, disposition]
+    decision_layer: [portfolio, fund]
+    authoritative_for: [portfolio performance, portfolio risks, asset prioritization]
+    expected_evidence: [asset list, values, returns, occupancy, NOI, risk commentary]
+    recommended_pipeline: portfolio_report_pipeline
+  investor_report:
+    purpose: Communicate fund and asset performance to investors.
+    likely_formats: [pdf, pptx]
+    parent_functional_work: [fund_management]
+    related_initiatives: [investor_reporting]
+    lifecycle_stage: [operations_ownership]
+    decision_layer: [fund]
+    authoritative_for: [investor-facing performance, distributions, fund narrative]
+    expected_evidence: [returns, NAV, distributions, asset updates, commentary]
+    recommended_pipeline: investor_report_pipeline
+  fund_model:
+    purpose: Model fund-level cash flows, capital accounts, returns, and distributions.
+    likely_formats: [xlsx, xlsm]
+    parent_functional_work: [fund_management]
+    related_initiatives: [investor_reporting, nav_update]
+    lifecycle_stage: [acquisition, operations_ownership, disposition]
+    decision_layer: [fund]
+    authoritative_for: [fund returns, capital calls, distributions, promote calculations]
+    expected_evidence: [capital contributions, distributions, NAV, fund IRR, waterfall]
+    recommended_pipeline: fund_model_pipeline
+  nav_package:
+    purpose: Support net asset value calculations and review.
+    likely_formats: [xlsx, pdf]
+    parent_functional_work: [fund_management, portfolio_management]
+    related_initiatives: [nav_update, investor_reporting, valuation_update]
+    lifecycle_stage: [operations_ownership]
+    decision_layer: [fund, portfolio]
+    authoritative_for: [NAV, asset values, fund-level adjustments]
+    expected_evidence: [asset values, debt, cash, ownership, fund expenses, NAV]
+    recommended_pipeline: nav_package_pipeline
+  rfp:
+    purpose: Define scope, process, and evaluation criteria for vendor or advisor selection.
+    likely_formats: [pdf, docx]
+    parent_functional_work: [vendor_advisor_selection]
+    related_initiatives: [property_manager_selection, broker_selection]
+    lifecycle_stage: [acquisition, operations_ownership, disposition]
+    decision_layer: [property, asset, transaction]
+    authoritative_for: [scope, process, requested services, evaluation criteria]
+    expected_evidence: [scope, timeline, submission requirements, criteria]
+    recommended_pipeline: rfp_pipeline
+  vendor_proposal:
+    purpose: Present a vendor or advisor's proposed services, fees, team, and qualifications.
+    likely_formats: [pdf, docx, pptx]
+    parent_functional_work: [vendor_advisor_selection]
+    related_initiatives: [property_manager_selection, broker_selection, insurance_renewal, tax_appeal, capital_project]
+    lifecycle_stage: [acquisition, development_value_creation, operations_ownership, disposition]
+    decision_layer: [property, asset, transaction]
+    authoritative_for: [proposal terms, fees, team, qualifications]
+    expected_evidence: [scope, fee, team, timeline, exclusions, qualifications]
+    recommended_pipeline: vendor_proposal_pipeline
+  service_agreement:
+    purpose: Define contracted services, fees, term, obligations, and termination rights.
+    likely_formats: [pdf, docx]
+    parent_functional_work: [vendor_advisor_selection, property_management]
+    related_initiatives: [property_manager_selection, broker_selection, insurance_renewal, tax_appeal, capital_project]
+    lifecycle_stage: [acquisition, development_value_creation, operations_ownership, disposition]
+    decision_layer: [property, asset, transaction]
+    authoritative_for: [contracted scope, fees, obligations, term, termination]
+    expected_evidence: [parties, scope, fee, term, obligations, termination]
+    recommended_pipeline: service_agreement_pipeline

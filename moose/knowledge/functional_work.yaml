@@ -1,0 +1,200 @@
+# TODO(Day 1): These categories are v0 assumptions derived from domain_model.md.
+# Expand only after Moose has examples and tests for the work contexts.
+functional_work:
+  acquisition_transaction_management:
+    purpose: Evaluate and execute acquisition, disposition, financing, and closing activity.
+    common_work:
+      - deal sourcing
+      - market analysis
+      - underwriting
+      - due diligence
+      - investment committee preparation
+      - financing coordination
+      - transaction execution
+      - LOI and PSA review
+      - closing coordination
+    common_initiatives:
+      - acquisition_process
+      - disposition_process
+      - refinancing
+      - broker_selection
+    common_documents:
+      - offering_memorandum
+      - financial_model
+      - investment_memo
+      - appraisal
+      - loan_agreement
+    decision_layers:
+      - transaction
+      - asset
+      - portfolio
+      - fund
+    lifecycle_stages:
+      - acquisition
+      - disposition
+      - operations_ownership
+
+  asset_management:
+    purpose: Own investment outcomes during the hold period.
+    common_work:
+      - business planning
+      - budgeting
+      - financial performance analysis
+      - leasing oversight
+      - property management oversight
+      - capital project oversight
+      - cash flow management
+      - debt management
+      - market intelligence
+      - reporting
+      - valuation
+      - risk monitoring
+    common_initiatives:
+      - annual_business_plan
+      - annual_budget
+      - quarterly_reforecast
+      - leasing_campaign
+      - lease_renewal_program
+      - capital_project
+      - refinancing
+      - lender_reporting
+      - valuation_update
+      - hold_sell_review
+      - insurance_renewal
+      - tax_appeal
+    common_documents:
+      - business_plan
+      - budget_workbook
+      - operating_statement
+      - variance_report
+      - rent_roll
+      - leasing_report
+      - property_management_report
+      - capital_project_tracker
+      - appraisal
+    decision_layers:
+      - asset
+      - property
+      - transaction
+    lifecycle_stages:
+      - development_value_creation
+      - operations_ownership
+      - disposition
+
+  property_management:
+    purpose: Operate the property day to day.
+    common_work:
+      - tenant relations
+      - building operations
+      - maintenance
+      - collections
+      - service requests
+      - vendor oversight
+      - compliance
+      - operating reporting
+    common_initiatives:
+      - property_manager_selection
+      - insurance_renewal
+      - tax_appeal
+      - capital_project
+      - lease_renewal_program
+    common_documents:
+      - property_management_report
+      - operating_statement
+      - leasing_report
+      - vendor_proposal
+      - service_agreement
+    decision_layers:
+      - property
+      - asset
+    lifecycle_stages:
+      - operations_ownership
+      - development_value_creation
+
+  portfolio_management:
+    purpose: Manage performance, risk, and capital allocation across multiple assets.
+    common_work:
+      - portfolio performance monitoring
+      - asset prioritization
+      - capital allocation
+      - risk concentration analysis
+      - market exposure analysis
+      - scenario planning
+      - portfolio reporting
+      - strategic planning
+    common_initiatives:
+      - hold_sell_review
+      - valuation_update
+      - investor_reporting
+      - quarterly_reforecast
+    common_documents:
+      - portfolio_report
+      - appraisal
+      - nav_package
+      - investor_report
+    decision_layers:
+      - portfolio
+      - asset
+      - fund
+    lifecycle_stages:
+      - operations_ownership
+      - disposition
+
+  fund_management:
+    purpose: Manage the investment vehicle and investor obligations.
+    common_work:
+      - fund strategy
+      - capital raising
+      - capital deployment
+      - investor reporting
+      - NAV management
+      - distributions
+      - fund accounting
+      - fund governance
+    common_initiatives:
+      - investor_reporting
+      - nav_update
+      - lender_reporting
+    common_documents:
+      - fund_model
+      - investor_report
+      - nav_package
+      - portfolio_report
+    decision_layers:
+      - fund
+      - portfolio
+    lifecycle_stages:
+      - acquisition
+      - operations_ownership
+      - disposition
+
+  vendor_advisor_selection:
+    purpose: Select and oversee third parties who contribute to execution.
+    common_work:
+      - scope definition
+      - RFP preparation
+      - proposal review
+      - vendor comparison
+      - fee analysis
+      - contract negotiation
+      - performance oversight
+    common_initiatives:
+      - property_manager_selection
+      - broker_selection
+      - insurance_renewal
+      - tax_appeal
+    common_documents:
+      - rfp
+      - vendor_proposal
+      - service_agreement
+    decision_layers:
+      - property
+      - asset
+      - portfolio
+      - fund
+      - transaction
+    lifecycle_stages:
+      - acquisition
+      - development_value_creation
+      - operations_ownership
+      - disposition

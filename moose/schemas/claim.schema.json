@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://moose.local/schemas/claim.schema.json",
+  "title": "Moose Claim",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "claim_id",
+    "claim_type",
+    "metric_or_subject",
+    "value",
+    "source_document",
+    "source_location",
+    "evidence",
+    "confidence",
+    "reasoning",
+    "extraction_method"
+  ],
+  "properties": {
+    "claim_id": {
+      "type": "string"
+    },
+    "claim_type": {
+      "type": "string"
+    },
+    "metric_or_subject": {
+      "type": "string"
+    },
+    "value": {},
+    "unit": {
+      "type": ["string", "null"]
+    },
+    "period": {
+      "type": ["string", "null"]
+    },
+    "source_document": {
+      "type": "string"
+    },
+    "source_location": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sheet", "cell"],
+      "properties": {
+        "sheet": {"type": "string"},
+        "cell": {"type": "string"},
+        "nearby_label": {"type": ["string", "null"]},
+        "table_or_section": {"type": ["string", "null"]}
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "quote": {"type": "string"},
+          "cell": {"type": "string"},
+          "page": {"type": "integer", "minimum": 1},
+          "table": {"type": "string"}
+        }
+      }
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "reasoning": {
+      "type": "string"
+    },
+    "extraction_method": {
+      "type": "string",
+      "description": "Examples: gpt_structured_extraction, workbook_orientation, human_entry."
+    }
+  }
+}

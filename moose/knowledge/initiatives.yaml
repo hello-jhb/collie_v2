@@ -1,0 +1,129 @@
+# TODO(Day 1): These initiatives are v0 assumptions derived from domain_model.md.
+# Expected evidence and outputs are intentionally skeletal until real examples are added.
+initiatives:
+  acquisition_process:
+    parent_functional_work: acquisition_transaction_management
+    lifecycle_stage: acquisition
+    decision_layer: transaction
+    expected_documents: [offering_memorandum, financial_model, investment_memo, appraisal, loan_agreement]
+    expected_evidence: [purchase price, debt amount, yield, assumptions, risks, sources and uses]
+    likely_outputs: [investment recommendation, diligence questions, underwriting summary]
+  disposition_process:
+    parent_functional_work: acquisition_transaction_management
+    lifecycle_stage: disposition
+    decision_layer: transaction
+    expected_documents: [offering_memorandum, appraisal, financial_model, broker_selection]
+    expected_evidence: [sale price, valuation, buyer demand, closing timeline, market comps]
+    likely_outputs: [sale recommendation, hold sell conclusion, broker process summary]
+  annual_budget:
+    parent_functional_work: asset_management
+    lifecycle_stage: operations_ownership
+    decision_layer: asset
+    expected_documents: [budget_workbook, operating_statement, rent_roll]
+    expected_evidence: [revenue assumptions, expense assumptions, NOI, occupancy, capital plan]
+    likely_outputs: [approved budget, budget risks, variance baseline]
+  annual_business_plan:
+    parent_functional_work: asset_management
+    lifecycle_stage: operations_ownership
+    decision_layer: asset
+    expected_documents: [business_plan, budget_workbook, rent_roll, capital_project_tracker]
+    expected_evidence: [strategy, leasing plan, budget, capital projects, valuation]
+    likely_outputs: [business plan recommendation, priority actions, risk register]
+  quarterly_reforecast:
+    parent_functional_work: asset_management
+    lifecycle_stage: operations_ownership
+    decision_layer: asset
+    expected_documents: [financial_model, operating_statement, variance_report, rent_roll]
+    expected_evidence: [actuals, forecast changes, NOI, occupancy, leasing changes]
+    likely_outputs: [updated forecast, variance explanation, action list]
+  leasing_campaign:
+    parent_functional_work: asset_management
+    lifecycle_stage: operations_ownership
+    decision_layer: property
+    expected_documents: [leasing_report, rent_roll, financial_model]
+    expected_evidence: [vacancy, prospects, rental rates, expirations, downtime]
+    likely_outputs: [leasing priorities, forecast impact, risk assessment]
+  lease_renewal_program:
+    parent_functional_work: asset_management
+    lifecycle_stage: operations_ownership
+    decision_layer: property
+    expected_documents: [lease, rent_roll, leasing_report]
+    expected_evidence: [expiration dates, rent, renewal options, tenant status]
+    likely_outputs: [renewal strategy, tenant risk list, cash flow impact]
+  capital_project:
+    parent_functional_work: asset_management
+    lifecycle_stage: development_value_creation
+    decision_layer: asset
+    expected_documents: [capital_project_tracker, budget_workbook, service_agreement, vendor_proposal]
+    expected_evidence: [scope, budget, schedule, commitments, change orders]
+    likely_outputs: [project status, budget risk, next actions]
+  refinancing:
+    parent_functional_work: asset_management
+    lifecycle_stage: operations_ownership
+    decision_layer: transaction
+    expected_documents: [financial_model, loan_agreement, appraisal, operating_statement]
+    expected_evidence: [loan balance, NOI, DSCR, maturity, rate, valuation]
+    likely_outputs: [refinancing feasibility, lender package, financing risks]
+  lender_reporting:
+    parent_functional_work: asset_management
+    lifecycle_stage: operations_ownership
+    decision_layer: asset
+    expected_documents: [operating_statement, rent_roll, financial_model, loan_agreement]
+    expected_evidence: [NOI, occupancy, covenant tests, debt service, reporting period]
+    likely_outputs: [lender report, covenant status, exception list]
+  valuation_update:
+    parent_functional_work: asset_management
+    lifecycle_stage: operations_ownership
+    decision_layer: asset
+    expected_documents: [appraisal, financial_model, operating_statement, rent_roll]
+    expected_evidence: [NOI, cap rate, discount rate, comps, occupancy]
+    likely_outputs: [valuation conclusion, valuation bridge, sensitivity summary]
+  hold_sell_review:
+    parent_functional_work: asset_management
+    lifecycle_stage: disposition
+    decision_layer: asset
+    expected_documents: [financial_model, appraisal, portfolio_report, business_plan]
+    expected_evidence: [value, IRR, remaining upside, risks, market timing]
+    likely_outputs: [hold sell recommendation, disposition priority, action plan]
+  property_manager_selection:
+    parent_functional_work: vendor_advisor_selection
+    lifecycle_stage: operations_ownership
+    decision_layer: property
+    expected_documents: [rfp, vendor_proposal, service_agreement]
+    expected_evidence: [scope, fees, team, references, reporting capabilities]
+    likely_outputs: [manager recommendation, comparison matrix, negotiation points]
+  broker_selection:
+    parent_functional_work: vendor_advisor_selection
+    lifecycle_stage: disposition
+    decision_layer: transaction
+    expected_documents: [rfp, vendor_proposal, service_agreement]
+    expected_evidence: [market coverage, team, fees, strategy, track record]
+    likely_outputs: [broker recommendation, interview questions, fee comparison]
+  insurance_renewal:
+    parent_functional_work: asset_management
+    lifecycle_stage: operations_ownership
+    decision_layer: asset
+    expected_documents: [vendor_proposal, service_agreement, operating_statement]
+    expected_evidence: [premium, coverage, deductibles, exclusions, renewal dates]
+    likely_outputs: [renewal recommendation, coverage risks, budget impact]
+  tax_appeal:
+    parent_functional_work: asset_management
+    lifecycle_stage: operations_ownership
+    decision_layer: asset
+    expected_documents: [appraisal, operating_statement, service_agreement]
+    expected_evidence: [assessed value, market value, NOI, tax expense, appeal deadline]
+    likely_outputs: [appeal recommendation, savings estimate, evidence package]
+  investor_reporting:
+    parent_functional_work: fund_management
+    lifecycle_stage: operations_ownership
+    decision_layer: fund
+    expected_documents: [investor_report, portfolio_report, nav_package]
+    expected_evidence: [returns, NAV, distributions, asset performance, commentary]
+    likely_outputs: [investor narrative, issue list, reporting package]
+  nav_update:
+    parent_functional_work: fund_management
+    lifecycle_stage: operations_ownership
+    decision_layer: fund
+    expected_documents: [nav_package, fund_model, appraisal, portfolio_report]
+    expected_evidence: [asset values, debt balances, cash, fund expenses, ownership]
+    likely_outputs: [NAV conclusion, reconciliation, review items]

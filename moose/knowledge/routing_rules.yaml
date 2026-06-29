@@ -1,0 +1,69 @@
+# TODO(Day 1): Routing maps known document types to named pipeline stubs only.
+# Day 2 should load this file in code and add confidence/human-review behavior.
+routing_rules:
+  financial_model:
+    pipeline: financial_model_pipeline
+    human_review_required: false
+  operating_statement:
+    pipeline: operating_statement_pipeline
+    human_review_required: false
+  rent_roll:
+    pipeline: rent_roll_pipeline
+    human_review_required: false
+  lease:
+    pipeline: lease_pipeline
+    human_review_required: false
+  loan_agreement:
+    pipeline: loan_agreement_pipeline
+    human_review_required: false
+  appraisal:
+    pipeline: appraisal_pipeline
+    human_review_required: false
+  offering_memorandum:
+    pipeline: offering_memorandum_pipeline
+    human_review_required: false
+  investment_memo:
+    pipeline: investment_memo_pipeline
+    human_review_required: false
+  business_plan:
+    pipeline: business_plan_pipeline
+    human_review_required: false
+  budget_workbook:
+    pipeline: budget_workbook_pipeline
+    human_review_required: false
+  variance_report:
+    pipeline: variance_report_pipeline
+    human_review_required: false
+  property_management_report:
+    pipeline: property_management_report_pipeline
+    human_review_required: false
+  leasing_report:
+    pipeline: leasing_report_pipeline
+    human_review_required: false
+  capital_project_tracker:
+    pipeline: capital_project_tracker_pipeline
+    human_review_required: false
+  portfolio_report:
+    pipeline: portfolio_report_pipeline
+    human_review_required: false
+  investor_report:
+    pipeline: investor_report_pipeline
+    human_review_required: false
+  fund_model:
+    pipeline: fund_model_pipeline
+    human_review_required: false
+  nav_package:
+    pipeline: nav_package_pipeline
+    human_review_required: false
+  rfp:
+    pipeline: rfp_pipeline
+    human_review_required: false
+  vendor_proposal:
+    pipeline: vendor_proposal_pipeline
+    human_review_required: false
+  service_agreement:
+    pipeline: service_agreement_pipeline
+    human_review_required: false
+  unknown:
+    pipeline: human_review
+    human_review_required: true

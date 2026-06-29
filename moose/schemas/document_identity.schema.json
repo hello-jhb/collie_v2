@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://moose.local/schemas/document_identity.schema.json",
+  "title": "Moose Document Identity",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "document_type",
+    "confidence",
+    "evidence",
+    "reasoning",
+    "human_review_required"
+  ],
+  "properties": {
+    "document_type": {
+      "type": "string",
+      "description": "Moose document type key, such as financial_model or rent_roll."
+    },
+    "file_type": {
+      "type": "string",
+      "description": "Deprecated alias for document_type retained for early Day 1 compatibility."
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "recommended_pipeline": {
+      "type": "string"
+    },
+    "reasoning": {
+      "type": "string"
+    },
+    "lifecycle_stage": {
+      "type": ["string", "null"]
+    },
+    "decision_layer": {
+      "type": ["string", "null"]
+    },
+    "functional_work": {
+      "type": ["string", "null"]
+    },
+    "initiative": {
+      "type": ["string", "null"]
+    },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {"type": "string"},
+          {
+            "type": "object",
+            "additionalProperties": true,
+            "properties": {
+              "source": {"type": "string"},
+              "location": {"type": "string"},
+              "text": {"type": "string"},
+              "weight": {"type": "number", "minimum": 0, "maximum": 1}
+            }
+          }
+        ]
+      }
+    },
+    "human_review_required": {
+      "type": "boolean"
+    },
+    "reason_for_routing": {
+      "type": "string"
+    }
+  }
+}

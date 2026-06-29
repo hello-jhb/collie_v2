@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://moose.local/schemas/agent_result.schema.json",
+  "title": "Moose Agent Result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["agent_name", "status", "output"],
+  "properties": {
+    "agent_name": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["ok", "needs_review", "error", "not_implemented"]
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "claims": {
+      "type": "array",
+      "items": {
+        "$ref": "claim.schema.json"
+      }
+    },
+    "verified_facts": {
+      "type": "array",
+      "items": {
+        "$ref": "verified_fact.schema.json"
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "errors": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+}
